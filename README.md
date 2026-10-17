@@ -44,5 +44,4 @@ python -m unittest discover -s tests
 
 ## Licenses
 
-Code: Apache-2.0 (`LICENSE`). Gemma 4: Apache-2.0. Fonts: see `fonts/`. Sample photos: see `samples/SOURCES.md`
-(CC BY 4.0, CC BY-SA 2.0, public domain).
+Code: Apache-2.0 (`LICENSE`). Gemma 4: Apache-2.0. Fonts: see `fonts/`.

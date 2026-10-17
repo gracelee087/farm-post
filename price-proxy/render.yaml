@@ -5,7 +5,7 @@ services:
   - type: web
     name: farm-post-price-proxy
     runtime: python
-    plan: free
+    # plan left out on purpose: Render keeps the plan chosen in the dashboard
     rootDir: price-proxy
     buildCommand: "true"  # standard library only, nothing to install
     startCommand: python server.py
