@@ -4,14 +4,19 @@ and on [Post] puts it in the outbox, which publishes to the shop channel (and th
 
 Only TELEGRAM_BOT_TOKEN is required (env or farm-post/.env). The first person who messages the bot
 becomes the owner (saved in owner.txt). Optional TELEGRAM_CHANNEL (e.g. @myshop): posts go there;
-without it, the finished post is sent back to the owner to forward anywhere. Run: python bot.py"""
+without it, the finished post is sent back to the owner to forward anywhere. Run: python bot.py
+On a server (Render): python bot.py --webhook, with OWNER_ID set (the bot tells you your ID)."""
+import hashlib
 import json
+import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import outbox
@@ -45,7 +50,11 @@ def download_photo(file_id: str) -> bytes:
 
 
 def allowed(user_id: int) -> bool:
-    """The first user to message the bot becomes the owner; only the owner may use it."""
+    """Only the owner may use the bot: OWNER_ID if set (needed on a server, whose files reset),
+    else the first user to message it (saved in owner.txt)."""
+    owner = publish_telegram.setting("OWNER_ID")
+    if owner:
+        return owner == str(user_id)
     if not OWNER_FILE.exists():
         OWNER_FILE.write_text(str(user_id), encoding="utf-8")
     return OWNER_FILE.read_text(encoding="utf-8").strip() == str(user_id)
@@ -130,7 +139,7 @@ def handle(update: dict) -> None:
             text="Sorry, this shop bot is private.")
         return
     if "photo" not in msg:
-        api("sendMessage", chat_id=chat_id, text=HELP)
+        api("sendMessage", chat_id=chat_id, text=f"{HELP}\n\n(Your Telegram ID: {msg['from']['id']})")
         return
     try:
         image = download_photo(msg["photo"][-1]["file_id"])  # last = largest size
@@ -139,10 +148,45 @@ def handle(update: dict) -> None:
         api("sendMessage", chat_id=chat_id, text=f"Sorry, something went wrong: {e}")
 
 
+def serve(port: int) -> None:
+    """Webhook mode for a server (e.g. Render): Telegram calls us, so nothing has to poll."""
+    url = os.environ.get("RENDER_EXTERNAL_URL") or publish_telegram.setting("PUBLIC_URL")
+    secret = hashlib.sha256(publish_telegram.setting("TELEGRAM_BOT_TOKEN").encode()).hexdigest()[:32]
+    api("setWebhook", url=f"{url}/telegram", secret_token=secret)
+
+    def safe_handle(update):
+        try:
+            handle(update)
+        except Exception as e:
+            print("Error:", e)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # health check
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def do_POST(self):
+            if self.path != "/telegram" or self.headers.get("X-Telegram-Bot-Api-Secret-Token") != secret:
+                self.send_response(403)
+                self.end_headers()
+                return
+            update = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+            self.send_response(200)  # answer at once; writing the listing takes a while
+            self.end_headers()
+            threading.Thread(target=safe_handle, args=(update,)).start()
+
+    print(f"Webhook set to {url}/telegram, listening on port {port}")
+    ThreadingHTTPServer(("", port), Handler).serve_forever()
+
+
 def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8")
     if not publish_telegram.setting("TELEGRAM_BOT_TOKEN"):
         sys.exit("TELEGRAM_BOT_TOKEN is missing (put it in farm-post/.env).")
+    if "--webhook" in sys.argv:
+        return serve(int(os.environ.get("PORT", "10000")))
+    api("deleteWebhook")  # polling and a webhook can't both be active
     print("Bot running. Send it a photo from your phone. Ctrl+C to stop.")
     offset = 0
     while True:

@@ -115,7 +115,12 @@ class BotTest(unittest.TestCase):
 
     def test_text_only_gets_help(self):
         bot.handle({"update_id": 3, "message": {"chat": {"id": 7}, "from": {"id": SELLER}, "text": "hi"}})
-        self.assertEqual(self.sent_texts()[-1], bot.HELP)
+        self.assertEqual(self.sent_texts()[-1], f"{bot.HELP}\n\n(Your Telegram ID: {SELLER})")
+
+    def test_owner_id_setting_wins_over_owner_file(self):
+        with mock.patch.object(publish_telegram, "setting", lambda name: {"OWNER_ID": "999"}.get(name, "")):
+            self.assertTrue(bot.allowed(999))
+            self.assertFalse(bot.allowed(SELLER))  # SELLER is in owner.txt but OWNER_ID decides
 
 
 if __name__ == "__main__":

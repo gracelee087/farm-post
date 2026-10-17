@@ -15,3 +15,23 @@ services:
         sync: false  # prompted in the Render Dashboard, never committed
       - key: PYTHON_VERSION
         value: 3.11.9
+
+  # The Telegram bot (bot.py in the repo root) with Gemma 4 from Google's cloud, so no computer has to stay on.
+  - type: web
+    name: farm-post-bot
+    runtime: python
+    plan: free
+    buildCommand: "true"  # standard library only, nothing to install
+    startCommand: python bot.py --webhook
+    healthCheckPath: /health
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: OWNER_ID
+        sync: false  # your Telegram user ID; the bot tells you it when you send it a text message
+      - key: TELEGRAM_CHANNEL
+        value: "@demofarmshop_lee"
+      - key: PYTHON_VERSION
+        value: 3.11.9

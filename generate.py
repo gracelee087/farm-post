@@ -9,6 +9,9 @@ import urllib.request
 from pathlib import Path
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
+# Same open model in Google's cloud (free tier): used when GEMINI_API_KEY is set, so no computer has to stay on.
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+CLOUD_MODEL = "gemma-4-26b-a4b-it"
 SKILL_FILE = Path(__file__).parent / "skills" / "farm-post" / "SKILL.md"
 
 
@@ -97,31 +100,49 @@ def _parse_json(text):
     raise ValueError(f"Model did not return valid JSON: {text[:500]!r}")
 
 
-def generate_post(image_bytes: bytes, note: str, model: str = "gemma4:e4b") -> dict:
-    payload = {
-        "model": model,
-        "messages": [{
-            "role": "user",
-            "content": PROMPT + (note.strip() or "(no note)"),
-            "images": [base64.b64encode(image_bytes).decode("ascii")],
-        }],
-        "format": "json",
-        "stream": False,
-        "think": False,
-    }
-    req = urllib.request.Request(OLLAMA_URL, data=json.dumps(payload).encode("utf-8"),
-                                 headers={"Content-Type": "application/json"})
-    start = time.time()
+def _post_json(url: str, payload: dict, headers: dict, name: str) -> dict:
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
+                                 headers={"Content-Type": "application/json", **headers})
     try:
         with urllib.request.urlopen(req, timeout=900) as resp:
-            reply = json.loads(resp.read().decode("utf-8"))
+            return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        raise RuntimeError(f"Ollama error {e.code}: {e.read().decode('utf-8', 'replace')}") from e
+        raise RuntimeError(f"{name} error {e.code}: {e.read().decode('utf-8', 'replace')[:500]}") from e
     except urllib.error.URLError as e:
-        raise RuntimeError(f"Cannot reach Ollama at {OLLAMA_URL}: {e.reason}") from e
+        raise RuntimeError(f"Cannot reach {name}: {e.reason}") from e
+
+
+def _ask_ollama(prompt: str, image_b64: str, model: str) -> str:
+    payload = {"model": model, "messages": [{"role": "user", "content": prompt, "images": [image_b64]}],
+               "format": "json", "stream": False, "think": False}
+    return _post_json(OLLAMA_URL, payload, {}, "Ollama").get("message", {}).get("content", "")
+
+
+def _ask_gemini(prompt: str, image_b64: str, mime: str, model: str, key: str) -> str:
+    payload = {"contents": [{"parts": [{"inline_data": {"mime_type": mime, "data": image_b64}}, {"text": prompt}]}]}
+    reply = _post_json(GEMINI_URL.format(model=model), payload, {"x-goog-api-key": key}, "Gemini API")
+    parts = reply.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+    return "".join(p.get("text", "") for p in parts if not p.get("thought"))  # skip thinking parts
+
+
+def generate_post(image_bytes: bytes, note: str, model: str = "") -> dict:
+    """Cloud Gemma if GEMINI_API_KEY is set (env or .env), else local Gemma via Ollama."""
+    from publish_telegram import setting  # reads env, then farm-post/.env
+
+    prompt = PROMPT + (note.strip() or "(no note)")
+    image_b64 = base64.b64encode(image_bytes).decode("ascii")
+    key = setting("GEMINI_API_KEY")
+    start = time.time()
+    if key:
+        model = model or setting("GEMMA_MODEL") or CLOUD_MODEL
+        mime = "image/png" if image_bytes.startswith(b"\x89PNG") else "image/jpeg"
+        text = _ask_gemini(prompt, image_b64, mime, model, key)
+    else:
+        model = model or "gemma4:e4b"
+        text = _ask_ollama(prompt, image_b64, model)
     seconds = time.time() - start
 
-    data = _parse_json(reply.get("message", {}).get("content", ""))
+    data = _parse_json(text)
     tags = data.get("tags", [])
     if isinstance(tags, str):
         tags = [t.strip() for t in tags.split(",") if t.strip()]
@@ -146,7 +167,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Generate a farm-shop listing from a photo and a note.")
     ap.add_argument("image")
     ap.add_argument("note")
-    ap.add_argument("--model", default="gemma4:e4b")
+    ap.add_argument("--model", default="")
     args = ap.parse_args()
     with open(args.image, "rb") as f:
         result = generate_post(f.read(), args.note, args.model)
