@@ -350,7 +350,9 @@ def handle(update: dict) -> None:
         else:
             api("sendMessage", chat_id=chat_id, text=f"{HELP}\n\n(Your Telegram ID: {msg['from']['id']})")
     except Exception as e:
-        api("sendMessage", chat_id=chat_id, text=f"Sorry, something went wrong: {e}")
+        print("Error:", e)
+        api("sendMessage", chat_id=chat_id, text="Sorry, the AI is busy right now. Please send the photo again in a minute."
+            if "Gemini API error" in str(e) else f"Sorry, something went wrong: {e}")
 
 
 def serve(port: int) -> None:

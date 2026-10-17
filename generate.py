@@ -125,6 +125,20 @@ def _ask_gemini(prompt: str, image_b64: str, mime: str, model: str, key: str) ->
     return "".join(p.get("text", "") for p in parts if not p.get("thought"))  # skip thinking parts
 
 
+def _ask_gemini_retry(prompt, image_b64, mime, model, key):
+    """The free tier is sometimes busy (429/5xx): wait and retry, then try the other Gemma 4 size."""
+    other = "gemma-4-31b-it" if model != "gemma-4-31b-it" else CLOUD_MODEL
+    attempts = [(model, 0), (model, 5), (other, 0), (other, 10)]
+    for i, (m, wait) in enumerate(attempts):
+        time.sleep(wait)
+        try:
+            return _ask_gemini(prompt, image_b64, mime, m, key), m
+        except RuntimeError as e:
+            print(f"Gemini API attempt {i + 1} with {m} failed: {str(e)[:300]}")
+            if i == len(attempts) - 1 or not any(f"error {c}" in str(e) for c in (429, 500, 502, 503, 504)):
+                raise
+
+
 def generate_post(image_bytes: bytes, note: str, model: str = "") -> dict:
     """Cloud Gemma if GEMINI_API_KEY is set (env or .env), else local Gemma via Ollama."""
     from publish_telegram import setting  # reads env, then farm-post/.env
@@ -136,7 +150,7 @@ def generate_post(image_bytes: bytes, note: str, model: str = "") -> dict:
     if key:
         model = model or setting("GEMMA_MODEL") or CLOUD_MODEL
         mime = "image/png" if image_bytes.startswith(b"\x89PNG") else "image/jpeg"
-        text = _ask_gemini(prompt, image_b64, mime, model, key)
+        text, model = _ask_gemini_retry(prompt, image_b64, mime, model, key)
     else:
         model = model or "gemma4:e4b"
         text = _ask_ollama(prompt, image_b64, model)

@@ -36,6 +36,21 @@ class GenerateTest(unittest.TestCase):
         self.assertEqual((post["title"], post["price_text"], post["search"]), ("Warm Scarf", "$25.00", "wool scarf"))
         self.assertEqual(post["model"], "gemma-4-26b-a4b-it")
 
+    def test_busy_cloud_retries_then_other_model(self):
+        busy = RuntimeError('Gemini API error 503: {"error": {"status": "UNAVAILABLE"}}')
+        with mock.patch.object(generate, "_ask_gemini", side_effect=[busy, busy, json.dumps(LISTING)]) as ask, \
+                mock.patch("time.sleep"):
+            text, model = generate._ask_gemini_retry("p", "img", "image/jpeg", "gemma-4-26b-a4b-it", "K")
+        self.assertEqual(model, "gemma-4-31b-it")
+        self.assertEqual(ask.call_count, 3)
+
+    def test_bad_request_is_not_retried(self):
+        bad = RuntimeError("Gemini API error 400: bad image")
+        with mock.patch.object(generate, "_ask_gemini", side_effect=[bad]) as ask, mock.patch("time.sleep"):
+            with self.assertRaises(RuntimeError):
+                generate._ask_gemini_retry("p", "img", "image/jpeg", "gemma-4-26b-a4b-it", "K")
+        self.assertEqual(ask.call_count, 1)
+
     def test_local_ollama_without_key(self):
         with mock.patch.object(publish_telegram, "setting", lambda n: ""), \
                 mock.patch("urllib.request.urlopen", return_value=reply({"message": {"content": json.dumps(LISTING)}})) as urlopen:
