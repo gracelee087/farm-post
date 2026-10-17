@@ -9,7 +9,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import bot  # noqa: E402
 import outbox  # noqa: E402
-import publish_site  # noqa: E402
 import publish_telegram  # noqa: E402
 
 JPEG = b"\xff\xd8\xff\xe0fake-jpeg"
@@ -38,7 +37,6 @@ class BotTest(unittest.TestCase):
         owner.write_text(str(SELLER), encoding="utf-8")
         for p in (mock.patch.object(outbox, "OUTBOX_DIR", Path(tmp.name) / "outbox"),
                   mock.patch.object(bot, "OWNER_FILE", owner),
-                  mock.patch.object(publish_site, "SITE_DIR", Path(tmp.name) / "site"),
                   mock.patch.object(publish_telegram, "setting", lambda name: env.get(name, "")),  # ignore a real .env
                   mock.patch.object(outbox, "is_online", return_value=True),
                   mock.patch.object(bot, "download_file", return_value=JPEG),
@@ -72,7 +70,6 @@ class BotTest(unittest.TestCase):
         [draft_id] = bot.drafts
         bot.handle(button(f"post:{draft_id}"))
         self.assertEqual(len(outbox.published()), 1)
-        self.assertTrue((publish_site.SITE_DIR / "index.html").exists())
         self.tg_publish.assert_called_once()
         self.assertEqual(self.tg_publish.call_args.kwargs, {"chat": "7"})  # no channel -> back to seller
         self.assertIn("Forward it", self.sent_texts()[-1])

@@ -22,7 +22,6 @@ from pathlib import Path
 
 import design
 import outbox
-import publish_site
 import publish_telegram
 from generate import generate_post, parse_price
 
@@ -68,7 +67,6 @@ def allowed(user_id: int) -> bool:
 
 
 def publish_all(records, chat=""):
-    publish_site.publish(records)
     if publish_telegram.setting("TELEGRAM_CHANNEL"):
         publish_telegram.publish(records)
     else:

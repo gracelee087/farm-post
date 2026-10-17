@@ -7,7 +7,6 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import outbox  # noqa: E402
-import publish_site  # noqa: E402
 
 JPEG = b"\xff\xd8\xff\xe0fake-jpeg"
 POST = {
@@ -21,11 +20,9 @@ class OutboxTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        root = Path(tmp.name)
-        for mod, attr, sub in ((outbox, "OUTBOX_DIR", "outbox"), (publish_site, "SITE_DIR", "site")):
-            patcher = mock.patch.object(mod, attr, root / sub)
-            patcher.start()
-            self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(outbox, "OUTBOX_DIR", Path(tmp.name) / "outbox")
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_save_creates_pending_record_and_image(self):
         post_id = outbox.save(POST, JPEG)
@@ -72,22 +69,6 @@ class OutboxTest(unittest.TestCase):
     def test_is_online_false_on_connection_error(self):
         with mock.patch("socket.create_connection", side_effect=OSError):
             self.assertFalse(outbox.is_online())
-
-    def test_publish_site_renders_escaped_posts_and_copies_images(self):
-        first = outbox.save(POST, JPEG)
-        with mock.patch.object(outbox, "is_online", return_value=True):
-            outbox.flush(publish_site.publish)
-            outbox.save({**POST, "title": "Eggs"}, JPEG)
-            outbox.flush(publish_site.publish)
-        page = (publish_site.SITE_DIR / "index.html").read_text(encoding="utf-8")
-        self.assertIn('lang="en"', page)
-        self.assertIn("Fresh potatoes &lt;from the farm&gt;", page)
-        self.assertIn("Eggs", page)  # both old and new posts are on the page
-        self.assertIn("Tasty.<br>Firm when cooked.", page)
-        self.assertIn("€1.20/kg", page)
-        self.assertIn("#regional", page)
-        self.assertNotIn("##regional", page)
-        self.assertTrue((publish_site.SITE_DIR / f"{first}.jpg").exists())
 
 
 if __name__ == "__main__":
