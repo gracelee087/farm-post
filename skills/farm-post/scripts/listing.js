@@ -52,28 +52,37 @@ function esc(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+function stockText(post) {
+  if (post.stock === 0) return "❌ SOLD OUT";
+  return typeof post.stock === "number" ? `Available: ${post.stock}` : "";
+}
+
+function tagText(post) {
+  return (post.tags || []).filter(Boolean).map((t) => "#" + t.replace(/^#/, "").replace(/\s+/g, "")).join(" ");
+}
+
 /** Telegram HTML message for a post. */
 function caption(post) {
   const price = [post.price_text, post.unit_price_text].filter(Boolean).join(" · ");
-  const tags = (post.tags || []).filter(Boolean).map((t) => "#" + t.replace(/^#/, "").replace(/\s+/g, "")).join(" ");
-  const parts = [`<b>${esc(post.title)}</b>` + (price ? `\n${esc(price)}` : ""), esc(post.body), esc(tags)];
-  return parts.filter(Boolean).join("\n\n").slice(0, CAPTION_LIMIT);
+  const head = [`<b>${esc(post.title)}</b>`, esc(price), esc(stockText(post))].filter(Boolean).join("\n");
+  return [head, esc(post.body), esc(tagText(post))].filter(Boolean).join("\n\n").slice(0, CAPTION_LIMIT);
 }
 
 /** Plain text version for copying into any app. */
 function plainText(post) {
   const price = [post.price_text, post.unit_price_text].filter(Boolean).join(" · ");
-  const tags = (post.tags || []).map((t) => "#" + t.replace(/^#/, "").replace(/\s+/g, "")).join(" ");
-  return [post.title + (price ? `\n${price}` : ""), post.body, tags].filter(Boolean).join("\n\n");
+  const head = [post.title, price, stockText(post)].filter(Boolean).join("\n");
+  return [head, post.body, tagText(post)].filter(Boolean).join("\n\n");
 }
 
-function makePost({ title, body, tags, note }) {
+function makePost({ title, body, tags, note, stock }) {
   if (!title || !body) throw new Error("title and body are required");
   const [price_text, unit_price_text] = parsePrice(note);
   return {
     title: String(title).trim(), body: String(body).trim(),
     tags: Array.isArray(tags) ? tags.map(String) : String(tags || "").split(",").map((t) => t.trim()).filter(Boolean),
     note: note || "", price_text, unit_price_text,
+    stock: Number.isInteger(stock) && stock >= 0 ? stock : null,
   };
 }
 
@@ -96,36 +105,91 @@ function addRecord(storage, post, now = new Date()) {
   return record;
 }
 
+/** Find a listing by id, else the newest whose title contains all given words, else the newest. */
+function findRecord(records, ref) {
+  const byId = records.find((r) => r.id === ref);
+  if (byId) return byId;
+  const words = String(ref || "").toLowerCase().split(/\s+/).filter(Boolean);
+  const newest = [...records].reverse();
+  return newest.find((r) => words.length && words.every((w) => r.post.title.toLowerCase().includes(w))) || newest[0];
+}
+
+/** Update stock with {sold: n} | {remaining: n} | {sold_out: true}; a posted listing is marked for a Telegram edit. */
+function updateStock(storage, { listing, sold, remaining, sold_out }) {
+  const records = load(storage);
+  const r = findRecord(records, listing);
+  if (!r) throw new Error("There are no listings yet.");
+  const p = r.post;
+  if (sold_out) p.stock = 0;
+  else if (Number.isInteger(remaining) && remaining >= 0) p.stock = remaining;
+  else if (Number.isInteger(sold) && sold > 0) {
+    if (typeof p.stock !== "number") throw new Error(`I don't know how many "${p.title}" you had. Tell me how many are left.`);
+    p.stock = Math.max(0, p.stock - sold);
+  } else throw new Error("Tell me how many were sold, how many are left, or that it is sold out.");
+  if (r.message_id) r.needs_edit = true;
+  save(storage, records);
+  return r;
+}
+
 /** "TOKEN @channel" -> {token, chat}; anything else -> null. */
 function parseSecret(secret) {
   const [token, chat] = String(secret || "").trim().split(/\s+/);
   return token && chat ? { token, chat } : null;
 }
 
-async function sendTelegram(fetchFn, { token, chat }, text) {
+async function telegram(fetchFn, { token }, method, params) {
   // Form-encoded body = "simple" CORS request (no preflight; Telegram answers OPTIONS with 501).
-  const body = new URLSearchParams({ chat_id: chat, text, parse_mode: "HTML" });
-  const res = await fetchFn(`https://api.telegram.org/bot${token}/sendMessage`, { method: "POST", body });
+  const res = await fetchFn(`https://api.telegram.org/bot${token}/${method}`,
+                            { method: "POST", body: new URLSearchParams(params) });
   const reply = await res.json();
   if (!reply.ok) throw new Error(`Telegram: ${reply.description}`);
+  return reply.result;
 }
 
-/** Post every pending record; each is marked published right after its own send. */
+/** Post every pending record and apply stock edits; each record is saved right after its own call. */
 async function flush(storage, fetchFn, secret, online) {
   const tg = parseSecret(secret);
-  const pending = load(storage).filter((r) => r.status === "pending");
-  if (!tg || !online || pending.length === 0) return { sent: 0, pending: pending.length, configured: !!tg };
-  let sent = 0;
-  for (const r of pending) {
-    await sendTelegram(fetchFn, tg, caption(r.post));
+  const waiting = () => load(storage).filter((r) => r.status === "pending").length;
+  const todo = load(storage).filter((r) => r.status === "pending" || r.needs_edit);
+  if (!tg || !online || todo.length === 0) return { sent: 0, edited: 0, pending: waiting(), configured: !!tg };
+  let sent = 0, edited = 0;
+  for (const r of todo) {
+    const text = caption(r.post);
+    let messageId = r.message_id;
+    if (r.status === "pending") {
+      messageId = (await telegram(fetchFn, tg, "sendMessage", { chat_id: tg.chat, text, parse_mode: "HTML" })).message_id;
+      sent++;
+    } else {
+      await telegram(fetchFn, tg, "editMessageText", { chat_id: tg.chat, message_id: r.message_id, text, parse_mode: "HTML" });
+      edited++;
+    }
     const records = load(storage);
-    records.find((x) => x.id === r.id).status = "published";
+    Object.assign(records.find((x) => x.id === r.id), { status: "published", message_id: messageId, needs_edit: false });
     save(storage, records);
-    sent++;
   }
-  return { sent, pending: pending.length - sent, configured: true };
+  return { sent, edited, pending: waiting(), configured: true };
+}
+
+// ---- market prices (needs internet) ----
+
+// Our small proxy on Render (price-proxy/ in the repo): SerpApi blocks browser calls to protect the key.
+const PRICE_URL = "https://farm-post-price-proxy.onrender.com";
+
+/** Online-shop prices for similar items, as a short sentence for the model. */
+async function marketPrice(fetchFn, query, country = "us") {
+  const url = `${PRICE_URL}/price?` + new URLSearchParams({ q: String(query).slice(0, 100), gl: country || "us" });
+  const res = await fetchFn(url); // simple GET: no CORS preflight; the free server may take ~1 min to wake up
+  const data = await res.json();
+  if (data.error) throw new Error(data.error);
+  if (!data.count) return `No online prices found for "${data.query}".`;
+  const cur = data.currency_hint || "";
+  const money = (x) => `${cur}${Number(x).toFixed(2)}`;
+  const examples = data.examples.slice(0, 3).map((e) => `${e.title} (${e.price}, ${e.source})`).join("; ");
+  return `Online shops (${data.gl.toUpperCase()}), ${data.count} offers for "${data.query}": ` +
+    `${money(data.min)} to ${money(data.max)}, typical ${money(data.median)}. Examples: ${examples}.`;
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { parsePrice, caption, plainText, makePost, load, addRecord, parseSecret, flush, STORAGE_KEY };
+  module.exports = { parsePrice, caption, plainText, makePost, load, addRecord, updateStock, parseSecret, flush,
+                     marketPrice, STORAGE_KEY, PRICE_URL };
 }

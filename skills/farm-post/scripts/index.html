@@ -8,10 +8,21 @@
   <body>
     <script>
       function status(r) {
-        if (r.sent > 0) return `Posted ${r.sent} listing(s) to Telegram.`;
-        if (!r.configured) return "Telegram is not set up, so the listing is saved on the phone. Use the Copy button to post it anywhere.";
+        const done = [];
+        if (r.sent > 0) done.push(`posted ${r.sent} listing(s) to Telegram`);
+        if (r.edited > 0) done.push(`updated ${r.edited} Telegram post(s)`);
+        if (done.length) return done.join(" and ") + ".";
+        if (!r.configured) return "Telegram is not set up, so it is saved on the phone. Use the Copy button to post it anywhere.";
         if (r.pending > 0) return `No internet right now. ${r.pending} listing(s) saved and will be posted next time you are online.`;
         return "Nothing waiting to be posted.";
+      }
+
+      async function tryFlush(secret) {
+        try {
+          return status(await flush(localStorage, fetch, secret, navigator.onLine));
+        } catch (e) {
+          return `Saved on the phone, but posting failed: ${e.message}. It will be tried again next time.`;
+        }
       }
 
       window["ai_edge_gallery_get_result"] = async (data, secret) => {
@@ -20,22 +31,25 @@
           const action = req.action || "create";
           let result, id = "";
           if (action === "create") {
-            const record = addRecord(localStorage, makePost(req));
-            id = record.id;
-            let r;
-            try {
-              r = await flush(localStorage, fetch, secret, navigator.onLine);
-            } catch (e) {
-              return JSON.stringify({ result: `Listing saved on the phone, but posting failed: ${e.message}. It will be tried again next time.`,
-                                      webview: { url: `card.html?id=${id}` } });
-            }
-            result = `Listing saved. ${status(r)}`;
+            id = addRecord(localStorage, makePost(req)).id;
+            result = `Listing saved. ${await tryFlush(secret)}`;
+          } else if (action === "stock") {
+            const r = updateStock(localStorage, req);
+            id = r.id;
+            const left = r.post.stock === 0 ? "now SOLD OUT" : `${r.post.stock} left`;
+            result = `"${r.post.title}": ${left}. ${await tryFlush(secret)}`;
+          } else if (action === "market") {
+            if (!navigator.onLine) return JSON.stringify({ result: "No internet right now. Prices can be checked once you are online." });
+            if (!req.query) return JSON.stringify({ error: "No product given to look up." });
+            return JSON.stringify({ result: await marketPrice(fetch, req.query, req.country) });
           } else if (action === "publish") {
-            result = status(await flush(localStorage, fetch, secret, navigator.onLine));
+            result = await tryFlush(secret);
           } else if (action === "list") {
             const records = load(localStorage);
-            const waiting = records.filter((x) => x.status === "pending").length;
-            result = `${records.length} listing(s) on this phone, ${waiting} waiting to be posted.`;
+            const lines = records.map((r) => `- ${r.post.title}: ${r.post.price_text || "no price"}, ` +
+              `${r.post.stock === null ? "stock unknown" : r.post.stock === 0 ? "SOLD OUT" : r.post.stock + " left"}, ` +
+              `${r.status === "published" ? "posted" : "waiting to be posted"}`);
+            result = records.length ? `${records.length} listing(s) on this phone:\n${lines.join("\n")}` : "No listings yet.";
           } else {
             return JSON.stringify({ error: `Unknown action: ${action}` });
           }

@@ -1,0 +1,17 @@
+# Render Blueprint, field names per https://render.com/docs/blueprint-spec
+# This file lives in price-proxy/, not the repo root, so set the Blueprint
+# file path to price-proxy/render.yaml when creating the Blueprint.
+services:
+  - type: web
+    name: farm-post-price-proxy
+    runtime: python
+    plan: free
+    rootDir: price-proxy
+    buildCommand: "true"  # standard library only, nothing to install
+    startCommand: python server.py
+    healthCheckPath: /health
+    envVars:
+      - key: SERPAPI_API_KEY
+        sync: false  # prompted in the Render Dashboard, never committed
+      - key: PYTHON_VERSION
+        value: 3.11.9

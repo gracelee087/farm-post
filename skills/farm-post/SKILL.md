@@ -51,14 +51,25 @@ Call the `run_js` tool with:
   - `tags`: Array of strings
   - `note`: String. The seller's own words (typed, or written down from their voice as above),
     with every number and price they gave. "" if none.
+  - `stock`: Integer, only if the seller says how many they HAVE ("I have 20 jars", "15 left").
+    A pack size like "10 kg" or "box of 6" is NOT stock. Leave it out if unsure.
 
 Then reply in one or two short sentences with what the script reported (posted, or saved
 until there is internet). Do not repeat the whole listing; the card shows it.
 
 ## Other requests
 
+- **Stock** ("sold 3 scarves", "only 5 jars left", "eggs are sold out"): call `run_js` with
+  `{"action": "stock", "listing": "<a word from the product title, e.g. scarf>", ...}` plus ONE of
+  `"sold": <number sold>`, `"remaining": <number left>`, or `"sold_out": true`.
+  The script updates the count and changes the Telegram post (e.g. to "❌ SOLD OUT").
+- **Market price** ("what should I charge?", or right after creating a listing that has NO price):
+  call `run_js` with `{"action": "market", "query": "<2-4 product words, e.g. hand knitted wool scarf>",
+  "country": "<2-letter country code from the seller's currency or location, default us>"}`.
+  Then tell the seller the price range in one sentence and say these are online-shop prices,
+  only a rough guide for a farm or market stall. Never change the listing's price yourself.
 - "Post my listings" / "I have internet now": call `run_js` with `{"action": "publish"}`.
-- "Show my listings": call `run_js` with `{"action": "list"}`.
+- "Show my listings" / "what do I have left?": call `run_js` with `{"action": "list"}`.
 
 ## Example
 
