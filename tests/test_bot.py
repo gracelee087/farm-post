@@ -1,4 +1,5 @@
 import sys
+import urllib.error
 import tempfile
 import unittest
 from pathlib import Path
@@ -117,6 +118,14 @@ class BotTest(unittest.TestCase):
             line = bot.market_price("wool scarf", "€25.00")
         self.assertIn("gl=de", urlopen.call_args.args[0])
         self.assertIn("€10.00 to €40.00, typical €20.00 (3 offers)", line)
+
+    def test_market_price_retries_while_server_wakes(self):
+        reply = mock.MagicMock()
+        reply.__enter__.return_value.read.return_value = (
+            b'{"query":"x","gl":"de","count":2,"min":1,"median":2,"max":3,"currency_hint":"\\u20ac"}')
+        waking = urllib.error.HTTPError("u", 502, "Bad Gateway", {}, None)
+        with mock.patch("urllib.request.urlopen", side_effect=[waking, reply]), mock.patch("time.sleep"):
+            self.assertIn("€1.00 to €3.00", bot.market_price("x", "€"))
 
     def test_text_only_gets_help(self):
         bot.handle({"update_id": 3, "message": {"chat": {"id": 7}, "from": {"id": SELLER}, "text": "hi"}})

@@ -97,8 +97,16 @@ def market_price(query: str, price_text: str) -> str:
     """Online-shop prices for similar items as one line for the seller; "" if none found."""
     gl = COUNTRY.get(price_text[:1]) or publish_telegram.setting("SHOP_COUNTRY") or "us"
     url = f"{PRICE_URL}/price?" + urllib.parse.urlencode({"q": query[:100], "gl": gl})
-    with urllib.request.urlopen(url, timeout=90) as resp:  # the free server may take ~1 min to wake up
-        d = json.loads(resp.read().decode("utf-8"))
+    for attempt in range(3):  # the free server answers 502 while it wakes up (~1 min), so try again
+        try:
+            with urllib.request.urlopen(url, timeout=90) as resp:
+                d = json.loads(resp.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as e:
+            if e.code not in (502, 503, 504) or attempt == 2:
+                raise
+            print(f"Price server answered {e.code}, retrying in 10 s")
+            time.sleep(10)
     if not d.get("count"):
         return ""
     cur = d.get("currency_hint") or ""
