@@ -50,11 +50,19 @@ def published() -> list:
     return [r for r in _records() if r["status"] == "published"]
 
 
-def mark_published(post_id: str) -> None:
-    path = OUTBOX_DIR / f"{post_id}.json"
-    record = json.loads(path.read_text(encoding="utf-8"))
-    record["status"] = "published"
-    _write_json(path, record)
+def get(post_id: str) -> dict:
+    return json.loads((OUTBOX_DIR / f"{post_id}.json").read_text(encoding="utf-8"))
+
+
+def update(post_id: str, **fields) -> dict:
+    record = {**get(post_id), **fields}
+    _write_json(OUTBOX_DIR / f"{post_id}.json", record)
+    return record
+
+
+def mark_published(post_id: str, **fields) -> None:
+    """fields: where it was posted (chat, message_id), so stock changes can edit the post later."""
+    update(post_id, status="published", **fields)
 
 
 def is_online(timeout: float = 1.5) -> bool:

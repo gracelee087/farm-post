@@ -55,6 +55,20 @@ class TelegramTest(unittest.TestCase):
                 publish_telegram.publish(outbox.pending())
         self.assertEqual((len(outbox.published()), len(outbox.pending())), (1, 1))
 
+    def test_publish_remembers_message_and_edit_rewrites_caption(self):
+        post_id = outbox.save({**POST, "stock": 3}, JPEG)
+        ok = io.BytesIO(json.dumps({"ok": True, "result": {"message_id": 55}}).encode())
+        with mock.patch("urllib.request.urlopen", return_value=ok):
+            publish_telegram.publish(outbox.pending())
+        record = outbox.get(post_id)
+        self.assertEqual((record["chat"], record["message_id"]), ("@shop", 55))
+        record = outbox.update(post_id, post={**record["post"], "stock": 0})
+        with mock.patch("urllib.request.urlopen", return_value=_reply()) as urlopen:
+            publish_telegram.edit(record)
+        req = urlopen.call_args.args[0]
+        self.assertTrue(req.full_url.endswith("/editMessageCaption"))
+        self.assertIn("SOLD OUT", json.loads(req.data)["caption"])
+
     def test_not_configured(self):
         with mock.patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHANNEL": ""}):
             self.assertFalse(publish_telegram.configured())

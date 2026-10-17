@@ -29,6 +29,7 @@ HELP = ("Send me a photo of what you are selling. I write the post, then you tap
         "(You can also type a note as the photo caption, e.g. hand-knitted scarf, wool, $25)")
 PRICES = ["1", "2", "3", "4", "5", "6", "8", "10", "15", "20"]
 UNITS = ["1 kg", "5 kg", "10 kg", "1 piece", "6 pieces", "10 pieces", "1 jar", "1 bag", "1 box"]
+STOCKS = ["5", "10", "20", "50", "100"]
 OWNER_FILE = Path(__file__).parent / "owner.txt"
 # Our proxy on Render (price-proxy/): it holds the SerpApi key and returns online-shop prices.
 PRICE_URL = "https://farm-post-price-proxy.onrender.com"
@@ -152,8 +153,27 @@ def finish(chat_id: int, draft_id: str, note: str) -> None:
     d = drafts[draft_id]
     d["note"] = d["post"]["note"] = note
     d["post"]["price_text"], d["post"]["unit_price_text"] = parse_price(note)
-    send_draft(chat_id, draft_id)
-    send_market_price(chat_id, d["post"])
+    rows = buttons(draft_id, "stock", STOCKS) + [[{"text": "Skip", "callback_data": f"stock:{draft_id}:skip"}]]
+    api("sendMessage", chat_id=chat_id, text="How many do you have?", reply_markup={"inline_keyboard": rows})
+
+
+# ---- stock: shown on the post, and the seller taps when things sell ----
+
+def sold_buttons(post_id: str) -> dict:
+    return {"inline_keyboard": [[{"text": "➖ 1 sold", "callback_data": f"sold:{post_id}:1"},
+                                 {"text": "➖ 5 sold", "callback_data": f"sold:{post_id}:5"},
+                                 {"text": "❌ Sold out", "callback_data": f"sold:{post_id}:out"}]]}
+
+
+def sell(chat_id: int, post_id: str, choice: str) -> None:
+    """Lower the stock of a posted listing and edit the channel post to match."""
+    r = outbox.get(post_id)
+    stock = 0 if choice == "out" else max(0, r["post"]["stock"] - int(choice))
+    r = outbox.update(post_id, post={**r["post"], "stock": stock})
+    if r.get("message_id"):
+        publish_telegram.edit(r)
+    api("sendMessage", chat_id=chat_id, text=f"{r['post']['title']}: {publish_telegram.stock_text(r['post'])}",
+        **({"reply_markup": sold_buttons(post_id)} if stock else {}))
 
 
 def handle(update: dict) -> None:
@@ -165,6 +185,12 @@ def handle(update: dict) -> None:
         action, _, rest = q["data"].partition(":")
         draft_id, _, choice = rest.partition(":")
         api("answerCallbackQuery", callback_query_id=q["id"])
+        if action == "sold":  # here draft_id is the outbox post id
+            try:
+                sell(chat_id, draft_id, choice)
+            except Exception as e:
+                api("sendMessage", chat_id=chat_id, text=f"Could not update the stock: {e}")
+            return
         d = drafts.get(draft_id)
         if not d:
             api("sendMessage", chat_id=chat_id, text="That draft is gone. Please send the photo again.")
@@ -179,16 +205,25 @@ def handle(update: dict) -> None:
         elif action == "type":
             waiting[chat_id] = draft_id
             api("sendMessage", chat_id=chat_id, text=f"Type the price and amount, e.g. 5 kg {currency()}8")
+        elif action == "stock":
+            d["post"]["stock"] = None if choice == "skip" else int(STOCKS[int(choice)])
+            send_draft(chat_id, draft_id)
+            send_market_price(chat_id, d["post"])
         elif action == "redo":
             write_draft(chat_id, d["image"], d["note"], draft_id)
         elif action == "post":
             drafts.pop(draft_id)
-            outbox.save(d["post"], d["image"])
+            post_id = outbox.save(d["post"], d["image"])
             try:
                 sent = outbox.flush(lambda records: publish_all(records, chat_id))
-                api("sendMessage", chat_id=chat_id,
-                    text=("Posted to your shop channel. ✅" if publish_telegram.setting("TELEGRAM_CHANNEL")
-                          else "Here is your finished post ⬆️ Forward it to your customers. ✅") if sent else "Saved. It will be posted when there is internet.")
+                text = (("Posted to your shop channel. ✅" if publish_telegram.setting("TELEGRAM_CHANNEL")
+                         else "Here is your finished post ⬆️ Forward it to your customers. ✅") if sent
+                        else "Saved. It will be posted when there is internet.")
+                if d["post"].get("stock"):
+                    api("sendMessage", chat_id=chat_id, text=text + "\nTap when something sells:",
+                        reply_markup=sold_buttons(post_id))
+                else:
+                    api("sendMessage", chat_id=chat_id, text=text)
             except Exception as e:  # stays in the outbox and is retried on the next post / restart
                 api("sendMessage", chat_id=chat_id, text=f"Saved, but posting failed (will retry): {e}")
         return

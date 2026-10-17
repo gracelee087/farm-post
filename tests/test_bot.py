@@ -157,6 +157,35 @@ class BotTest(unittest.TestCase):
         bot.handle(button(first["callback_data"]))
         self.assertEqual(bot.drafts[draft_id]["post"]["unit_price_text"], "€1.60/kg")
 
+    def test_stock_then_post_then_sold(self):
+        draft_id = self.photo_only()
+        bot.handle(button(f"price:{draft_id}:{bot.PRICES.index('3')}"))
+        bot.handle(button(f"unit:{draft_id}:{bot.UNITS.index('1 jar')}"))
+        self.assertEqual(self.sent_texts()[-1], "How many do you have?")
+        bot.handle(button(f"stock:{draft_id}:{bot.STOCKS.index('20')}"))
+        self.assertIn("Available: 20", self.sent_texts()[-1])
+        bot.handle(button(f"post:{draft_id}"))
+        [record] = outbox.published()
+        sold = self.last_keyboard()[0]
+        self.assertEqual([b["text"] for b in sold], ["➖ 1 sold", "➖ 5 sold", "❌ Sold out"])
+        outbox.update(record["id"], chat="@shop", message_id=77)  # as publish_telegram.publish records it
+        with mock.patch.object(publish_telegram, "edit") as edit:
+            bot.handle(button(sold[1]["callback_data"]))
+            self.assertEqual(edit.call_args.args[0]["post"]["stock"], 15)
+            self.assertIn("Available: 15", self.sent_texts()[-1])
+            bot.handle(button(sold[2]["callback_data"]))
+            self.assertEqual(outbox.get(record["id"])["post"]["stock"], 0)
+            self.assertIn("SOLD OUT", self.sent_texts()[-1])
+            self.assertNotIn("reply_markup", self.api.call_args_list[-1].kwargs)  # nothing left to sell
+
+    def test_skip_stock(self):
+        draft_id = self.photo_only()
+        bot.handle(button(f"type:{draft_id}:0"))
+        bot.handle({"update_id": 5, "message": {"chat": {"id": 7}, "from": {"id": SELLER}, "text": "€4"}})
+        bot.handle(button(f"stock:{draft_id}:skip"))
+        self.assertIsNone(bot.drafts[draft_id]["post"]["stock"])
+        self.assertNotIn("Available", self.sent_texts()[-1])
+
     def test_owner_id_setting_wins_over_owner_file(self):
         with mock.patch.object(publish_telegram, "setting", lambda name: {"OWNER_ID": "999"}.get(name, "")):
             self.assertTrue(bot.allowed(999))
