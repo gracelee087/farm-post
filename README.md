@@ -5,6 +5,8 @@ For small rural sellers (one person or a family): vegetables, fruit, eggs, honey
 
 Built for the DEV Hacktoberfest Open-Source AI Challenge, Week 2 "Side Hustle".
 
+**Demo video:** https://youtu.be/Ahk6svVCpEQ · **Demo channel:** https://t.me/demofarmshop_lee
+
 ## How it works
 
 1. The seller sends a photo to the Farm Post bot on Telegram.
