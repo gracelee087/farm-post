@@ -7,6 +7,7 @@ becomes the owner (saved in owner.txt). Optional TELEGRAM_CHANNEL (e.g. @myshop)
 without it, the finished post is sent back to the owner to forward anywhere. Run: python bot.py
 On a server (Render): python bot.py --webhook, with OWNER_ID set (the bot tells you your ID)."""
 import hashlib
+import html
 import json
 import os
 import sys
@@ -22,17 +23,18 @@ from pathlib import Path
 import outbox
 import publish_site
 import publish_telegram
-from generate import generate_post, transcribe
+from generate import generate_post, parse_price
 
-HELP = ("Send me a photo of what you are selling. Then hold 🎙️ and say what it is and the price, "
-        "or type it as the photo caption.\nFor example: hand-knitted scarf, wool, $25")
-ASK_NOTE = "📷 Got it. Now hold 🎙️ and say what it is and the price (or type it)."
+HELP = ("Send me a photo of what you are selling. I write the post, then you tap the price.\n"
+        "(You can also type a note as the photo caption, e.g. hand-knitted scarf, wool, $25)")
+PRICES = ["1", "2", "3", "4", "5", "6", "8", "10", "15", "20"]
+UNITS = ["1 kg", "5 kg", "10 kg", "1 piece", "6 pieces", "10 pieces", "1 jar", "1 bag", "1 box"]
 OWNER_FILE = Path(__file__).parent / "owner.txt"
 # Our proxy on Render (price-proxy/): it holds the SerpApi key and returns online-shop prices.
 PRICE_URL = "https://farm-post-price-proxy.onrender.com"
 COUNTRY = {"€": "de", "$": "us", "£": "gb", "₹": "in"}  # currency of the note -> shop country
-drafts = {}  # draft id -> {"post", "image", "note"}
-waiting = {}  # chat id -> photo sent without a caption, waiting for a voice or text note
+drafts = {}  # draft id -> {"post", "image", "note", "price"}
+waiting = {}  # chat id -> draft id whose price the seller chose to type
 
 
 def api(method: str, **params) -> dict:
@@ -72,7 +74,7 @@ def publish_all(records, chat=""):
 
 def send_draft(chat_id: int, draft_id: str) -> None:
     d = drafts[draft_id]
-    text = publish_telegram.caption(d["post"]) + f"\n\n<i>Written in {d['post']['seconds']:.0f} s on this computer.</i>"
+    text = publish_telegram.caption(d["post"]) + f"\n\n<i>Written by {d['post']['model']} in {d['post']['seconds']:.0f} s.</i>"
     api("sendMessage", chat_id=chat_id, text=text, parse_mode="HTML", reply_markup={"inline_keyboard": [[
         {"text": "✅ Post", "callback_data": f"post:{draft_id}"},
         {"text": "🔄 Try again", "callback_data": f"redo:{draft_id}"},
@@ -92,12 +94,7 @@ def market_price(query: str, price_text: str) -> str:
             f"typical {cur}{d['median']:.2f} ({d['count']} offers). Only a rough guide for a farm or market stall.")
 
 
-def write_draft(chat_id: int, image: bytes, note: str, draft_id: str = "") -> None:
-    api("sendMessage", chat_id=chat_id, text="Writing your listing… (about 30 seconds)")
-    draft_id = draft_id or uuid.uuid4().hex[:8]
-    post = generate_post(image, note)
-    drafts[draft_id] = {"post": post, "image": image, "note": note}
-    send_draft(chat_id, draft_id)
+def send_market_price(chat_id: int, post: dict) -> None:
     if post.get("search"):
         try:
             line = market_price(post["search"], post["price_text"])
@@ -107,17 +104,81 @@ def write_draft(chat_id: int, image: bytes, note: str, draft_id: str = "") -> No
             print("Market price lookup failed:", e)
 
 
+def write_draft(chat_id: int, image: bytes, note: str, draft_id: str = "") -> None:
+    api("sendMessage", chat_id=chat_id, text="Writing your listing… (about 30 seconds)")
+    draft_id = draft_id or uuid.uuid4().hex[:8]
+    post = dict(generate_post(image, note), note=note)
+    drafts[draft_id] = {"post": post, "image": image, "note": note}
+    send_draft(chat_id, draft_id)
+    send_market_price(chat_id, post)
+
+
+# ---- photo only: Gemma writes the post, the seller taps the price ----
+
+def currency() -> str:
+    return publish_telegram.setting("SHOP_CURRENCY") or "€"
+
+
+def last_note(item: str) -> str:
+    """The price note of the newest earlier post for the same kind of item (a farm sells the same things again)."""
+    words = set(item.lower().split())
+    for r in reversed(outbox.published() + outbox.pending()):
+        if r["post"].get("note") and words & set(r["post"].get("item", "").lower().split()):
+            return r["post"]["note"]
+    return ""
+
+
+def buttons(draft_id: str, action: str, labels: list, per_row: int = 5) -> list:
+    keys = [{"text": label, "callback_data": f"{action}:{draft_id}:{i}"} for i, label in enumerate(labels)]
+    return [keys[i:i + per_row] for i in range(0, len(keys), per_row)]
+
+
+def start_from_photo(chat_id: int, image: bytes) -> None:
+    api("sendMessage", chat_id=chat_id, text="Looking at your photo… (about 30 seconds)")
+    draft_id = uuid.uuid4().hex[:8]
+    post = dict(generate_post(image, ""), note="")
+    drafts[draft_id] = {"post": post, "image": image, "note": ""}
+    rows = buttons(draft_id, "price", [currency() + p for p in PRICES])
+    last = last_note(post["item"])
+    if last:
+        rows.insert(0, [{"text": f"⭐ {last} (like last time)", "callback_data": f"last:{draft_id}:0"}])
+    rows.append([{"text": "✏️ Type it", "callback_data": f"type:{draft_id}:0"}])
+    api("sendMessage", chat_id=chat_id, text=f"<b>{html.escape(post['title'])}</b>\nHow much?",
+        parse_mode="HTML", reply_markup={"inline_keyboard": rows})
+
+
+def finish(chat_id: int, draft_id: str, note: str) -> None:
+    """Put the chosen price on the draft (computed in code, like a typed note) and show it."""
+    d = drafts[draft_id]
+    d["note"] = d["post"]["note"] = note
+    d["post"]["price_text"], d["post"]["unit_price_text"] = parse_price(note)
+    send_draft(chat_id, draft_id)
+    send_market_price(chat_id, d["post"])
+
+
 def handle(update: dict) -> None:
     if "callback_query" in update:
         q = update["callback_query"]
         chat_id = q["message"]["chat"]["id"]
         if not allowed(q["from"]["id"]):
             return
-        action, _, draft_id = q["data"].partition(":")
+        action, _, rest = q["data"].partition(":")
+        draft_id, _, choice = rest.partition(":")
         api("answerCallbackQuery", callback_query_id=q["id"])
         d = drafts.get(draft_id)
         if not d:
             api("sendMessage", chat_id=chat_id, text="That draft is gone. Please send the photo again.")
+        elif action == "price":
+            d["price"] = PRICES[int(choice)]
+            api("sendMessage", chat_id=chat_id, text=f"{currency()}{d['price']} for how much?",
+                reply_markup={"inline_keyboard": buttons(draft_id, "unit", UNITS, per_row=3)})
+        elif action == "unit":
+            finish(chat_id, draft_id, f"{UNITS[int(choice)]} {currency()}{d['price']}")
+        elif action == "last":
+            finish(chat_id, draft_id, last_note(d["post"]["item"]))
+        elif action == "type":
+            waiting[chat_id] = draft_id
+            api("sendMessage", chat_id=chat_id, text=f"Type the price and amount, e.g. 5 kg {currency()}8")
         elif action == "redo":
             write_draft(chat_id, d["image"], d["note"], draft_id)
         elif action == "post":
@@ -146,15 +207,9 @@ def handle(update: dict) -> None:
             if msg.get("caption"):
                 write_draft(chat_id, image, msg["caption"])
             else:
-                waiting[chat_id] = image
-                api("sendMessage", chat_id=chat_id, text=ASK_NOTE)
-        elif chat_id in waiting and ("voice" in msg or "text" in msg):
-            if "voice" in msg:
-                note = transcribe(download_file(msg["voice"]["file_id"]), msg["voice"].get("mime_type", "audio/ogg"))
-                api("sendMessage", chat_id=chat_id, text=f"📝 I heard: {note}")
-            else:
-                note = msg["text"]
-            write_draft(chat_id, waiting.pop(chat_id), note)
+                start_from_photo(chat_id, image)
+        elif "text" in msg and waiting.get(chat_id) in drafts:
+            finish(chat_id, waiting.pop(chat_id), msg["text"])
         else:
             api("sendMessage", chat_id=chat_id, text=f"{HELP}\n\n(Your Telegram ID: {msg['from']['id']})")
     except Exception as e:

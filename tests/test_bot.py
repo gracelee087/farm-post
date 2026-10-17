@@ -118,27 +118,44 @@ class BotTest(unittest.TestCase):
         bot.handle({"update_id": 3, "message": {"chat": {"id": 7}, "from": {"id": SELLER}, "text": "hi"}})
         self.assertEqual(self.sent_texts()[-1], f"{bot.HELP}\n\n(Your Telegram ID: {SELLER})")
 
-    def test_photo_then_voice_note(self):
+    def photo_only(self):
         update = photo_update()
         del update["message"]["caption"]
         bot.handle(update)
-        self.assertEqual(self.sent_texts()[-1], bot.ASK_NOTE)
-        bot.generate_post.assert_not_called()
-        voice = {"update_id": 4, "message": {"chat": {"id": 7}, "from": {"id": SELLER},
-                                             "voice": {"file_id": "v1", "mime_type": "audio/ogg"}}}
-        with mock.patch.object(bot, "transcribe", return_value="5 kg apples €8") as tr:
-            bot.handle(voice)
-        tr.assert_called_once_with(JPEG, "audio/ogg")  # download_file is mocked to return JPEG bytes
-        self.assertIn("📝 I heard: 5 kg apples €8", self.sent_texts())
-        bot.generate_post.assert_called_once_with(JPEG, "5 kg apples €8")
+        [draft_id] = bot.drafts
+        return draft_id
+
+    def last_keyboard(self):
+        return self.api.call_args_list[-1].kwargs["reply_markup"]["inline_keyboard"]
+
+    def test_photo_only_then_tap_price_and_unit(self):
+        draft_id = self.photo_only()
+        bot.generate_post.assert_called_once_with(JPEG, "")
+        labels = [b["text"] for row in self.last_keyboard() for b in row]
+        self.assertEqual(labels[:3], ["€1", "€2", "€3"])
+        self.assertEqual(labels[-1], "✏️ Type it")
+        bot.handle(button(f"price:{draft_id}:{bot.PRICES.index('8')}"))
+        self.assertIn("1 kg", [b["text"] for row in self.last_keyboard() for b in row])
+        bot.handle(button(f"unit:{draft_id}:{bot.UNITS.index('5 kg')}"))
+        post = bot.drafts[draft_id]["post"]
+        self.assertEqual((post["note"], post["price_text"], post["unit_price_text"]), ("5 kg €8", "€8.00", "€1.60/kg"))
+        bot.generate_post.assert_called_once()  # tapping the price doesn't call the model again
+
+    def test_photo_only_then_type_price(self):
+        draft_id = self.photo_only()
+        bot.handle(button(f"type:{draft_id}:0"))
+        bot.handle({"update_id": 5, "message": {"chat": {"id": 7}, "from": {"id": SELLER}, "text": "6 jars $4"}})
+        self.assertEqual(bot.drafts[draft_id]["post"]["price_text"], "$4.00")
         self.assertEqual(bot.waiting, {})
 
-    def test_photo_then_typed_note(self):
-        update = photo_update()
-        del update["message"]["caption"]
-        bot.handle(update)
-        bot.handle({"update_id": 5, "message": {"chat": {"id": 7}, "from": {"id": SELLER}, "text": "jam €4"}})
-        bot.generate_post.assert_called_once_with(JPEG, "jam €4")
+    def test_same_price_as_last_time(self):
+        outbox.save(dict(POST, item="Fresh persimmons", note="5 kg €8"), JPEG)
+        bot.generate_post.return_value = dict(POST, item="persimmons")
+        draft_id = self.photo_only()
+        first = self.last_keyboard()[0][0]
+        self.assertEqual(first["text"], "⭐ 5 kg €8 (like last time)")
+        bot.handle(button(first["callback_data"]))
+        self.assertEqual(bot.drafts[draft_id]["post"]["unit_price_text"], "€1.60/kg")
 
     def test_owner_id_setting_wins_over_owner_file(self):
         with mock.patch.object(publish_telegram, "setting", lambda name: {"OWNER_ID": "999"}.get(name, "")):
