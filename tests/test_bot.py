@@ -154,6 +154,13 @@ class BotTest(unittest.TestCase):
         self.assertIn("💡 Online shops (DE) ...", question)
         self.assertTrue(question.endswith("How much?"))
 
+    def test_every_listing_gets_id_and_date(self):
+        draft_id = self.photo_only()
+        post = bot.drafts[draft_id]["post"]
+        self.assertRegex(post["ref"], r"^\d{4}-[0-9A-F]{4}$")
+        self.assertIn(f"[{post['ref']}]", self.sent_texts()[-1])  # shown with the price question
+        self.assertIn(f"Ref {post['ref']} · {post['date']}", publish_telegram.caption(post))  # and on the post
+
     def test_photo_only_then_type_price(self):
         draft_id = self.photo_only()
         bot.handle(button(f"type:{draft_id}:0"))

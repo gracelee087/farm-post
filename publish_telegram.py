@@ -44,7 +44,8 @@ def caption(post: dict) -> str:
     price = " · ".join(p for p in (post.get("price_text"), post.get("unit_price_text")) if p)
     tags = " ".join("#" + t.lstrip("#").replace(" ", "") for t in post.get("tags", []) if t)
     head = "\n".join(p for p in (f"<b>{_esc(post.get('title', ''))}</b>", _esc(price), stock_text(post)) if p)
-    tail = _esc(tags)
+    stamp = f"Ref {post['ref']} · {post.get('date', '')}" if post.get("ref") else ""
+    tail = "\n".join(p for p in (_esc(tags), f"<i>{_esc(stamp)}</i>" if stamp else "") if p)
     room = CAPTION_LIMIT - len(head) - len(tail) - 4
     body = post.get("body", "")
     if len(body) > room:

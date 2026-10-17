@@ -75,6 +75,15 @@ def publish_all(records, chat=""):
         publish_telegram.publish(records, chat=str(chat))
 
 
+def new_listing(post: dict, draft_id: str) -> dict:
+    """Stamp a listing with a short ID and the date, so several listings can be told apart."""
+    return dict(post, ref=f"{time.strftime('%m%d')}-{draft_id[:4].upper()}", date=time.strftime("%d %b %Y"))
+
+
+def ref(post: dict) -> str:
+    return f"[{post['ref']}] " if post.get("ref") else ""
+
+
 def send_draft(chat_id: int, draft_id: str) -> None:
     d = drafts[draft_id]
     text = publish_telegram.caption(d["post"]) + f"\n\n<i>Written by {d['post']['model']} in {d['post']['seconds']:.0f} s.</i>"
@@ -110,7 +119,7 @@ def send_market_price(chat_id: int, post: dict) -> None:
 def write_draft(chat_id: int, image: bytes, note: str, draft_id: str = "") -> None:
     api("sendMessage", chat_id=chat_id, text="Writing your listing… (about 30 seconds)")
     draft_id = draft_id or uuid.uuid4().hex[:8]
-    post = dict(generate_post(image, note), note=note)
+    post = new_listing(dict(generate_post(image, note), note=note), draft_id)
     drafts[draft_id] = {"post": post, "image": image, "original": image, "note": note}
     send_draft(chat_id, draft_id)
     send_market_price(chat_id, post)
@@ -150,7 +159,7 @@ def start_from_photo(chat_id: int, image: bytes) -> None:
     api("sendMessage", chat_id=chat_id, text="Looking at your photo… (about 30 seconds)")
     wake_price_server()
     draft_id = uuid.uuid4().hex[:8]
-    post = dict(generate_post(image, ""), note="")
+    post = new_listing(dict(generate_post(image, ""), note=""), draft_id)
     drafts[draft_id] = {"post": post, "image": image, "original": image, "note": ""}
     rows = buttons(draft_id, "price", [currency() + p for p in PRICES])
     last = last_note(post["item"])
@@ -164,7 +173,7 @@ def start_from_photo(chat_id: int, image: bytes) -> None:
         except Exception as e:
             print("Market price lookup failed:", e)
     api("sendMessage", chat_id=chat_id, parse_mode="HTML", reply_markup={"inline_keyboard": rows},
-        text=f"<b>{html.escape(post['title'])}</b>\n\n" + (f"{html.escape(hint)}\n\n" if hint else "") + "How much?")
+        text=f"<b>{html.escape(ref(post) + post['title'])}</b>\n\n" + (f"{html.escape(hint)}\n\n" if hint else "") + "How much?")
 
 
 def finish(chat_id: int, draft_id: str, note: str) -> None:
@@ -191,7 +200,7 @@ def sell(chat_id: int, post_id: str, choice: str) -> None:
     r = outbox.update(post_id, post={**r["post"], "stock": stock})
     if r.get("message_id"):
         publish_telegram.edit(r)
-    api("sendMessage", chat_id=chat_id, text=f"{r['post']['title']}: {publish_telegram.stock_text(r['post'])}",
+    api("sendMessage", chat_id=chat_id, text=f"{ref(r['post'])}{r['post']['title']}: {publish_telegram.stock_text(r['post'])}",
         **({"reply_markup": sold_buttons(post_id)} if stock else {}))
 
 
@@ -202,7 +211,7 @@ def send_designs(chat_id: int, draft_id: str) -> None:
     d["designs"] = design.designs(d["original"], d["post"])
     token = publish_telegram.setting("TELEGRAM_BOT_TOKEN")
     for i, jpg in enumerate(d["designs"]):
-        publish_telegram.send_photo(token, chat_id, jpg, f"Design {i + 1}", {"inline_keyboard": [[
+        publish_telegram.send_photo(token, chat_id, jpg, f"{ref(d['post'])}Design {i + 1}", {"inline_keyboard": [[
             {"text": f"✅ Use design {i + 1}", "callback_data": f"design:{draft_id}:{i}"}]]})
     api("sendMessage", chat_id=chat_id, text="Pick a design, or keep your own photo:", reply_markup={
         "inline_keyboard": [[{"text": "📷 My photo as it is", "callback_data": f"design:{draft_id}:orig"}]]})
@@ -212,7 +221,9 @@ def redo(chat_id: int, draft_id: str) -> None:
     """Write the text again; keep the seller's price, stock and photo."""
     d = drafts[draft_id]
     api("sendMessage", chat_id=chat_id, text="Writing it again… (about 30 seconds)")
-    d["post"] = dict(generate_post(d["original"], d["note"]), note=d["note"], stock=d["post"].get("stock"))
+    old = d["post"]
+    d["post"] = dict(generate_post(d["original"], d["note"]), note=d["note"], stock=old.get("stock"),
+                     ref=old.get("ref"), date=old.get("date"))
     if "designs" in d:
         send_designs(chat_id, draft_id)
     else:
@@ -257,12 +268,12 @@ def reserve(chat_id: int, user: dict, post_id: str, amount: int) -> None:
     r = outbox.update(post_id, post=post, orders=r.get("orders", []) + [order])
     if r.get("message_id"):
         publish_telegram.edit(r)
-    api("sendMessage", chat_id=chat_id, text=f"✅ Reserved: {amount} × {post['title']} ({post.get('price_text', '')}).\n"
+    api("sendMessage", chat_id=chat_id, text=f"✅ Reserved: {ref(post)}{amount} × {post['title']} ({post.get('price_text', '')}).\n"
                                              "The farmer will message you about pickup. You pay when you pick it up.")
     if owner_chat():
         who = html.escape(order["name"] or "A customer") + (f" (@{order['username']})" if order["username"] else "")
         api("sendMessage", chat_id=owner_chat(), parse_mode="HTML",
-            text=f"🛒 New reservation: <b>{amount} × {html.escape(post['title'])}</b>\n"
+            text=f"🛒 New reservation: {html.escape(ref(post))}<b>{amount} × {html.escape(post['title'])}</b>\n"
                  f"From: <a href=\"tg://user?id={user['id']}\">{who}</a>\n{publish_telegram.stock_text(post)}")
 
 
