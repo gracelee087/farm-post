@@ -40,7 +40,7 @@ class BotTest(unittest.TestCase):
                   mock.patch.object(publish_site, "SITE_DIR", Path(tmp.name) / "site"),
                   mock.patch.object(publish_telegram, "setting", lambda name: env.get(name, "")),  # ignore a real .env
                   mock.patch.object(outbox, "is_online", return_value=True),
-                  mock.patch.object(bot, "download_photo", return_value=JPEG),
+                  mock.patch.object(bot, "download_file", return_value=JPEG),
                   mock.patch.object(bot, "generate_post", return_value=dict(POST))):
             p.start()
             self.addCleanup(p.stop)
@@ -48,13 +48,14 @@ class BotTest(unittest.TestCase):
         self.tg_publish = mock.patch.object(publish_telegram, "publish").start()
         self.addCleanup(mock.patch.stopall)
         bot.drafts.clear()
+        bot.waiting.clear()
 
     def sent_texts(self):
         return [c.kwargs.get("text", "") for c in self.api.call_args_list if c.args[0] == "sendMessage"]
 
     def test_photo_gives_draft_with_buttons(self):
         bot.handle(photo_update())
-        bot.download_photo.assert_called_once_with("big")
+        bot.download_file.assert_called_once_with("big")
         bot.generate_post.assert_called_once_with(JPEG, "scarf, wool, $25")
         draft = self.api.call_args_list[-1].kwargs
         self.assertIn("Warm Hand-Knitted Scarf", draft["text"])
@@ -116,6 +117,28 @@ class BotTest(unittest.TestCase):
     def test_text_only_gets_help(self):
         bot.handle({"update_id": 3, "message": {"chat": {"id": 7}, "from": {"id": SELLER}, "text": "hi"}})
         self.assertEqual(self.sent_texts()[-1], f"{bot.HELP}\n\n(Your Telegram ID: {SELLER})")
+
+    def test_photo_then_voice_note(self):
+        update = photo_update()
+        del update["message"]["caption"]
+        bot.handle(update)
+        self.assertEqual(self.sent_texts()[-1], bot.ASK_NOTE)
+        bot.generate_post.assert_not_called()
+        voice = {"update_id": 4, "message": {"chat": {"id": 7}, "from": {"id": SELLER},
+                                             "voice": {"file_id": "v1", "mime_type": "audio/ogg"}}}
+        with mock.patch.object(bot, "transcribe", return_value="5 kg apples €8") as tr:
+            bot.handle(voice)
+        tr.assert_called_once_with(JPEG, "audio/ogg")  # download_file is mocked to return JPEG bytes
+        self.assertIn("📝 I heard: 5 kg apples €8", self.sent_texts())
+        bot.generate_post.assert_called_once_with(JPEG, "5 kg apples €8")
+        self.assertEqual(bot.waiting, {})
+
+    def test_photo_then_typed_note(self):
+        update = photo_update()
+        del update["message"]["caption"]
+        bot.handle(update)
+        bot.handle({"update_id": 5, "message": {"chat": {"id": 7}, "from": {"id": SELLER}, "text": "jam €4"}})
+        bot.generate_post.assert_called_once_with(JPEG, "jam €4")
 
     def test_owner_id_setting_wins_over_owner_file(self):
         with mock.patch.object(publish_telegram, "setting", lambda name: {"OWNER_ID": "999"}.get(name, "")):

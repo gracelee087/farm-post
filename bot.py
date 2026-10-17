@@ -22,15 +22,17 @@ from pathlib import Path
 import outbox
 import publish_site
 import publish_telegram
-from generate import generate_post
+from generate import generate_post, transcribe
 
-HELP = ("Send me a photo of what you are selling, with a short note as the caption.\n"
-        "For example: hand-knitted scarf, wool, $25")
+HELP = ("Send me a photo of what you are selling. Then hold 🎙️ and say what it is and the price, "
+        "or type it as the photo caption.\nFor example: hand-knitted scarf, wool, $25")
+ASK_NOTE = "📷 Got it. Now hold 🎙️ and say what it is and the price (or type it)."
 OWNER_FILE = Path(__file__).parent / "owner.txt"
 # Our proxy on Render (price-proxy/): it holds the SerpApi key and returns online-shop prices.
 PRICE_URL = "https://farm-post-price-proxy.onrender.com"
 COUNTRY = {"€": "de", "$": "us", "£": "gb", "₹": "in"}  # currency of the note -> shop country
 drafts = {}  # draft id -> {"post", "image", "note"}
+waiting = {}  # chat id -> photo sent without a caption, waiting for a voice or text note
 
 
 def api(method: str, **params) -> dict:
@@ -42,7 +44,7 @@ def api(method: str, **params) -> dict:
         return json.loads(resp.read().decode("utf-8"))["result"]
 
 
-def download_photo(file_id: str) -> bytes:
+def download_file(file_id: str) -> bytes:
     token = publish_telegram.setting("TELEGRAM_BOT_TOKEN")
     path = api("getFile", file_id=file_id)["file_path"]
     with urllib.request.urlopen(f"https://api.telegram.org/file/bot{token}/{path}", timeout=60) as resp:
@@ -138,12 +140,23 @@ def handle(update: dict) -> None:
         api("sendMessage", chat_id=chat_id,
             text="Sorry, this shop bot is private.")
         return
-    if "photo" not in msg:
-        api("sendMessage", chat_id=chat_id, text=f"{HELP}\n\n(Your Telegram ID: {msg['from']['id']})")
-        return
     try:
-        image = download_photo(msg["photo"][-1]["file_id"])  # last = largest size
-        write_draft(chat_id, image, msg.get("caption", ""))
+        if "photo" in msg:
+            image = download_file(msg["photo"][-1]["file_id"])  # last = largest size
+            if msg.get("caption"):
+                write_draft(chat_id, image, msg["caption"])
+            else:
+                waiting[chat_id] = image
+                api("sendMessage", chat_id=chat_id, text=ASK_NOTE)
+        elif chat_id in waiting and ("voice" in msg or "text" in msg):
+            if "voice" in msg:
+                note = transcribe(download_file(msg["voice"]["file_id"]), msg["voice"].get("mime_type", "audio/ogg"))
+                api("sendMessage", chat_id=chat_id, text=f"📝 I heard: {note}")
+            else:
+                note = msg["text"]
+            write_draft(chat_id, waiting.pop(chat_id), note)
+        else:
+            api("sendMessage", chat_id=chat_id, text=f"{HELP}\n\n(Your Telegram ID: {msg['from']['id']})")
     except Exception as e:
         api("sendMessage", chat_id=chat_id, text=f"Sorry, something went wrong: {e}")
 

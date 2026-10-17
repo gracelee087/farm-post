@@ -12,6 +12,9 @@ OLLAMA_URL = "http://localhost:11434/api/chat"
 # Same open model in Google's cloud (free tier): used when GEMINI_API_KEY is set, so no computer has to stay on.
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 CLOUD_MODEL = "gemma-4-26b-a4b-it"
+# Cloud Gemma 4 rejects audio ("Audio input modality is not enabled for this model"),
+# so voice notes are written down by a small Gemini model; Gemma still writes the listing.
+TRANSCRIBE_MODEL = "gemini-flash-lite-latest"
 SKILL_FILE = Path(__file__).parent / "skills" / "farm-post" / "SKILL.md"
 
 
@@ -123,6 +126,18 @@ def _ask_gemini(prompt: str, image_b64: str, mime: str, model: str, key: str) ->
     reply = _post_json(GEMINI_URL.format(model=model), payload, {"x-goog-api-key": key}, "Gemini API")
     parts = reply.get("candidates", [{}])[0].get("content", {}).get("parts", [])
     return "".join(p.get("text", "") for p in parts if not p.get("thought"))  # skip thinking parts
+
+
+def transcribe(audio_bytes: bytes, mime: str = "audio/ogg") -> str:
+    """A seller's voice note -> the note as text, numbers as digits (Telegram voice notes are OGG)."""
+    from publish_telegram import setting
+
+    key = setting("GEMINI_API_KEY")
+    if not key:
+        raise RuntimeError("voice notes need GEMINI_API_KEY; please type the note instead")
+    prompt = ("Write down exactly what the speaker says, in English, with numbers as digits "
+              "(\"five kilos for eight euros\" -> \"5 kg for €8\"). Reply with only the text.")
+    return _ask_gemini(prompt, base64.b64encode(audio_bytes).decode("ascii"), mime, TRANSCRIBE_MODEL, key).strip()
 
 
 def generate_post(image_bytes: bytes, note: str, model: str = "") -> dict:
