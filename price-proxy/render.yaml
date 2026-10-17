@@ -21,7 +21,7 @@ services:
     name: farm-post-bot
     runtime: python
     plan: free
-    buildCommand: "true"  # standard library only, nothing to install
+    buildCommand: pip install pillow==12.3.0  # for the three post designs (design.py)
     startCommand: python bot.py --webhook
     healthCheckPath: /health
     envVars:

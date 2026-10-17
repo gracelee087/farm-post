@@ -26,7 +26,9 @@ class TelegramTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         for patcher in (mock.patch.object(outbox, "OUTBOX_DIR", Path(tmp.name) / "outbox"),
                         mock.patch.object(publish_telegram, "ENV_FILE", Path(tmp.name) / ".env"),
-                        mock.patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "T", "TELEGRAM_CHANNEL": "@shop"})):
+                        mock.patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "T", "TELEGRAM_CHANNEL": "@shop",
+                                                       "BOT_USERNAME": "shop_bot"}),
+                        mock.patch.object(publish_telegram, "_bot_name", [])):
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -58,8 +60,9 @@ class TelegramTest(unittest.TestCase):
     def test_publish_remembers_message_and_edit_rewrites_caption(self):
         post_id = outbox.save({**POST, "stock": 3}, JPEG)
         ok = io.BytesIO(json.dumps({"ok": True, "result": {"message_id": 55}}).encode())
-        with mock.patch("urllib.request.urlopen", return_value=ok):
+        with mock.patch("urllib.request.urlopen", return_value=ok) as urlopen:
             publish_telegram.publish(outbox.pending())
+        self.assertIn(f"https://t.me/shop_bot?start=o{post_id}".encode(), urlopen.call_args.args[0].data)
         record = outbox.get(post_id)
         self.assertEqual((record["chat"], record["message_id"]), ("@shop", 55))
         record = outbox.update(post_id, post={**record["post"], "stock": 0})
@@ -68,6 +71,7 @@ class TelegramTest(unittest.TestCase):
         req = urlopen.call_args.args[0]
         self.assertTrue(req.full_url.endswith("/editMessageCaption"))
         self.assertIn("SOLD OUT", json.loads(req.data)["caption"])
+        self.assertNotIn("reply_markup", json.loads(req.data))  # sold out: the Reserve button goes away
 
     def test_not_configured(self):
         with mock.patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHANNEL": ""}):

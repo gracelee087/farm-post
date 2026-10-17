@@ -20,6 +20,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import design
 import outbox
 import publish_site
 import publish_telegram
@@ -30,6 +31,7 @@ HELP = ("Send me a photo of what you are selling. I write the post, then you tap
 PRICES = ["1", "2", "3", "4", "5", "6", "8", "10", "15", "20"]
 UNITS = ["1 kg", "5 kg", "10 kg", "1 piece", "6 pieces", "10 pieces", "1 jar", "1 bag", "1 box"]
 STOCKS = ["5", "10", "20", "50", "100"]
+ORDER_AMOUNTS = ["1", "2", "3", "5", "10"]
 OWNER_FILE = Path(__file__).parent / "owner.txt"
 # Our proxy on Render (price-proxy/): it holds the SerpApi key and returns online-shop prices.
 PRICE_URL = "https://farm-post-price-proxy.onrender.com"
@@ -109,7 +111,7 @@ def write_draft(chat_id: int, image: bytes, note: str, draft_id: str = "") -> No
     api("sendMessage", chat_id=chat_id, text="Writing your listing… (about 30 seconds)")
     draft_id = draft_id or uuid.uuid4().hex[:8]
     post = dict(generate_post(image, note), note=note)
-    drafts[draft_id] = {"post": post, "image": image, "note": note}
+    drafts[draft_id] = {"post": post, "image": image, "original": image, "note": note}
     send_draft(chat_id, draft_id)
     send_market_price(chat_id, post)
 
@@ -138,7 +140,7 @@ def start_from_photo(chat_id: int, image: bytes) -> None:
     api("sendMessage", chat_id=chat_id, text="Looking at your photo… (about 30 seconds)")
     draft_id = uuid.uuid4().hex[:8]
     post = dict(generate_post(image, ""), note="")
-    drafts[draft_id] = {"post": post, "image": image, "note": ""}
+    drafts[draft_id] = {"post": post, "image": image, "original": image, "note": ""}
     rows = buttons(draft_id, "price", [currency() + p for p in PRICES])
     last = last_note(post["item"])
     if last:
@@ -176,14 +178,92 @@ def sell(chat_id: int, post_id: str, choice: str) -> None:
         **({"reply_markup": sold_buttons(post_id)} if stock else {}))
 
 
+# ---- designs: three looks made from the real photo, the seller picks one ----
+
+def send_designs(chat_id: int, draft_id: str) -> None:
+    d = drafts[draft_id]
+    d["designs"] = design.designs(d["original"], d["post"])
+    token = publish_telegram.setting("TELEGRAM_BOT_TOKEN")
+    for i, jpg in enumerate(d["designs"]):
+        publish_telegram.send_photo(token, chat_id, jpg, f"Design {i + 1}", {"inline_keyboard": [[
+            {"text": f"✅ Use design {i + 1}", "callback_data": f"design:{draft_id}:{i}"}]]})
+    api("sendMessage", chat_id=chat_id, text="Pick a design, or keep your own photo:", reply_markup={
+        "inline_keyboard": [[{"text": "📷 My photo as it is", "callback_data": f"design:{draft_id}:orig"}]]})
+
+
+def redo(chat_id: int, draft_id: str) -> None:
+    """Write the text again; keep the seller's price, stock and photo."""
+    d = drafts[draft_id]
+    api("sendMessage", chat_id=chat_id, text="Writing it again… (about 30 seconds)")
+    d["post"] = dict(generate_post(d["original"], d["note"]), note=d["note"], stock=d["post"].get("stock"))
+    if "designs" in d:
+        send_designs(chat_id, draft_id)
+    else:
+        send_draft(chat_id, draft_id)
+
+
+# ---- buying: 🛒 Reserve under a channel post opens this bot for the customer ----
+
+def owner_chat() -> str:
+    return publish_telegram.setting("OWNER_ID") or (OWNER_FILE.read_text(encoding="utf-8").strip()
+                                                    if OWNER_FILE.exists() else "")
+
+
+def start_order(chat_id: int, post_id: str) -> None:
+    try:
+        r = outbox.get(post_id)
+    except (OSError, ValueError):
+        api("sendMessage", chat_id=chat_id, text="Sorry, this item is no longer listed.")
+        return
+    stock = r["post"].get("stock")
+    if stock == 0:
+        api("sendMessage", chat_id=chat_id, text=f"Sorry, {r['post']['title']} is sold out.")
+        return
+    amounts = [n for n in ORDER_AMOUNTS if stock is None or int(n) <= stock]
+    price = " · ".join(p for p in (r["post"].get("price_text"), r["post"].get("unit_price_text")) if p)
+    api("sendMessage", chat_id=chat_id, parse_mode="HTML",
+        text=f"<b>{html.escape(r['post']['title'])}</b>\n{html.escape(price)}\n"
+             f"{publish_telegram.stock_text(r['post'])}\n\nHow many would you like to reserve?",
+        reply_markup={"inline_keyboard": [[{"text": n, "callback_data": f"order:{post_id}:{n}"} for n in amounts]]})
+
+
+def reserve(chat_id: int, user: dict, post_id: str, amount: int) -> None:
+    """Take a reservation: lower the stock, update the channel post, tell the customer and the seller."""
+    r = outbox.get(post_id)
+    stock = r["post"].get("stock")
+    if isinstance(stock, int) and amount > stock:
+        api("sendMessage", chat_id=chat_id, text=f"Sorry, only {stock} left.")
+        return
+    order = {"user_id": user["id"], "name": user.get("first_name", ""), "username": user.get("username", ""),
+             "amount": amount, "at": time.strftime("%Y-%m-%d %H:%M")}
+    post = {**r["post"], "stock": stock - amount if isinstance(stock, int) else stock}
+    r = outbox.update(post_id, post=post, orders=r.get("orders", []) + [order])
+    if r.get("message_id"):
+        publish_telegram.edit(r)
+    api("sendMessage", chat_id=chat_id, text=f"✅ Reserved: {amount} × {post['title']} ({post.get('price_text', '')}).\n"
+                                             "The farmer will message you about pickup. You pay when you pick it up.")
+    if owner_chat():
+        who = html.escape(order["name"] or "A customer") + (f" (@{order['username']})" if order["username"] else "")
+        api("sendMessage", chat_id=owner_chat(), parse_mode="HTML",
+            text=f"🛒 New reservation: <b>{amount} × {html.escape(post['title'])}</b>\n"
+                 f"From: <a href=\"tg://user?id={user['id']}\">{who}</a>\n{publish_telegram.stock_text(post)}")
+
+
 def handle(update: dict) -> None:
     if "callback_query" in update:
         q = update["callback_query"]
         chat_id = q["message"]["chat"]["id"]
-        if not allowed(q["from"]["id"]):
-            return
         action, _, rest = q["data"].partition(":")
         draft_id, _, choice = rest.partition(":")
+        if action == "order":  # customers: anyone may reserve
+            api("answerCallbackQuery", callback_query_id=q["id"])
+            try:
+                reserve(chat_id, q["from"], draft_id, int(choice))
+            except Exception as e:
+                api("sendMessage", chat_id=chat_id, text=f"Sorry, the reservation did not go through: {e}")
+            return
+        if not allowed(q["from"]["id"]):
+            return
         api("answerCallbackQuery", callback_query_id=q["id"])
         if action == "sold":  # here draft_id is the outbox post id
             try:
@@ -207,10 +287,13 @@ def handle(update: dict) -> None:
             api("sendMessage", chat_id=chat_id, text=f"Type the price and amount, e.g. 5 kg {currency()}8")
         elif action == "stock":
             d["post"]["stock"] = None if choice == "skip" else int(STOCKS[int(choice)])
+            send_designs(chat_id, draft_id)
+        elif action == "design":
+            d["image"] = d["original"] if choice == "orig" else d["designs"][int(choice)]
             send_draft(chat_id, draft_id)
             send_market_price(chat_id, d["post"])
         elif action == "redo":
-            write_draft(chat_id, d["image"], d["note"], draft_id)
+            redo(chat_id, draft_id)
         elif action == "post":
             drafts.pop(draft_id)
             post_id = outbox.save(d["post"], d["image"])
@@ -232,9 +315,12 @@ def handle(update: dict) -> None:
     if not msg:
         return
     chat_id = msg["chat"]["id"]
+    if msg.get("text", "").startswith("/start o"):  # a customer tapped 🛒 Reserve under a post
+        start_order(chat_id, msg["text"][len("/start o"):].strip())
+        return
     if not allowed(msg["from"]["id"]):
         api("sendMessage", chat_id=chat_id,
-            text="Sorry, this shop bot is private.")
+            text="Hello! To buy something, tap 🛒 Reserve under a post in the shop channel.")
         return
     try:
         if "photo" in msg:

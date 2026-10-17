@@ -46,6 +46,9 @@ class BotTest(unittest.TestCase):
             self.addCleanup(p.stop)
         self.api = mock.patch.object(bot, "api").start()
         self.tg_publish = mock.patch.object(publish_telegram, "publish").start()
+        self.tg_photo = mock.patch.object(publish_telegram, "send_photo").start()
+        self.tg_edit = mock.patch.object(publish_telegram, "edit").start()
+        mock.patch.object(bot.design, "designs", return_value=[b"d1", b"d2", b"d3"]).start()
         self.addCleanup(mock.patch.stopall)
         bot.drafts.clear()
         bot.waiting.clear()
@@ -83,7 +86,7 @@ class BotTest(unittest.TestCase):
     def test_stranger_is_refused_with_their_id(self):
         bot.handle(photo_update(user=555))
         bot.generate_post.assert_not_called()
-        self.assertIn("private", self.sent_texts()[-1])
+        self.assertIn("Reserve", self.sent_texts()[-1])
 
     def test_first_user_becomes_owner(self):
         bot.OWNER_FILE.unlink()
@@ -163,20 +166,53 @@ class BotTest(unittest.TestCase):
         bot.handle(button(f"unit:{draft_id}:{bot.UNITS.index('1 jar')}"))
         self.assertEqual(self.sent_texts()[-1], "How many do you have?")
         bot.handle(button(f"stock:{draft_id}:{bot.STOCKS.index('20')}"))
+        self.assertEqual(self.tg_photo.call_count, 3)  # three designs to pick from
+        bot.handle(button(f"design:{draft_id}:1"))
         self.assertIn("Available: 20", self.sent_texts()[-1])
         bot.handle(button(f"post:{draft_id}"))
         [record] = outbox.published()
+        self.assertEqual((outbox.OUTBOX_DIR / record["image"]).read_bytes(), b"d2")  # the chosen design is posted
         sold = self.last_keyboard()[0]
         self.assertEqual([b["text"] for b in sold], ["➖ 1 sold", "➖ 5 sold", "❌ Sold out"])
         outbox.update(record["id"], chat="@shop", message_id=77)  # as publish_telegram.publish records it
-        with mock.patch.object(publish_telegram, "edit") as edit:
-            bot.handle(button(sold[1]["callback_data"]))
-            self.assertEqual(edit.call_args.args[0]["post"]["stock"], 15)
-            self.assertIn("Available: 15", self.sent_texts()[-1])
-            bot.handle(button(sold[2]["callback_data"]))
-            self.assertEqual(outbox.get(record["id"])["post"]["stock"], 0)
-            self.assertIn("SOLD OUT", self.sent_texts()[-1])
-            self.assertNotIn("reply_markup", self.api.call_args_list[-1].kwargs)  # nothing left to sell
+        bot.handle(button(sold[1]["callback_data"]))
+        self.assertEqual(self.tg_edit.call_args.args[0]["post"]["stock"], 15)
+        self.assertIn("Available: 15", self.sent_texts()[-1])
+        bot.handle(button(sold[2]["callback_data"]))
+        self.assertEqual(outbox.get(record["id"])["post"]["stock"], 0)
+        self.assertIn("SOLD OUT", self.sent_texts()[-1])
+        self.assertNotIn("reply_markup", self.api.call_args_list[-1].kwargs)  # nothing left to sell
+
+    def test_customer_reserves_from_channel_button(self):
+        post_id = outbox.save(dict(POST, stock=4), JPEG)
+        outbox.update(post_id, chat="@shop", message_id=9)
+        customer = {"id": 555, "first_name": "Anna", "username": "anna_b"}
+        bot.handle({"update_id": 6, "message": {"chat": {"id": 555}, "from": customer, "text": f"/start o{post_id}"}})
+        amounts = [b["text"] for b in self.last_keyboard()[0]]
+        self.assertEqual(amounts, ["1", "2", "3"])  # only what is in stock
+        bot.handle({"update_id": 7, "callback_query": {"id": "q", "data": f"order:{post_id}:3", "from": customer,
+                                                       "message": {"chat": {"id": 555}}}})
+        record = outbox.get(post_id)
+        self.assertEqual(record["post"]["stock"], 1)
+        self.assertEqual(record["orders"][0]["amount"], 3)
+        self.tg_edit.assert_called_once()  # channel post now says Available: 1
+        to_customer, to_seller = self.api.call_args_list[-2].kwargs, self.api.call_args_list[-1].kwargs
+        self.assertEqual(to_customer["chat_id"], 555)
+        self.assertIn("✅ Reserved: 3 ×", to_customer["text"])
+        self.assertEqual(to_seller["chat_id"], str(SELLER))
+        self.assertIn("tg://user?id=555", to_seller["text"])
+        self.assertIn("@anna_b", to_seller["text"])
+
+    def test_customer_cannot_reserve_more_than_stock(self):
+        post_id = outbox.save(dict(POST, stock=1), JPEG)
+        bot.handle({"update_id": 7, "callback_query": {"id": "q", "data": f"order:{post_id}:2", "from": {"id": 555},
+                                                       "message": {"chat": {"id": 555}}}})
+        self.assertEqual(self.sent_texts()[-1], "Sorry, only 1 left.")
+        self.assertEqual(outbox.get(post_id)["post"]["stock"], 1)
+
+    def test_stranger_message_points_to_channel(self):
+        bot.handle({"update_id": 8, "message": {"chat": {"id": 555}, "from": {"id": 555}, "text": "hello"}})
+        self.assertIn("🛒 Reserve", self.sent_texts()[-1])
 
     def test_skip_stock(self):
         draft_id = self.photo_only()

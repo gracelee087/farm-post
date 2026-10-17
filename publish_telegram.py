@@ -62,19 +62,42 @@ def _check(reply: dict) -> dict:
     return reply.get("result", {})
 
 
-def _send_photo(token, channel, image_path: Path, text: str) -> dict:
+def send_photo(token, chat, image: bytes, text: str, reply_markup=None) -> dict:
     boundary = uuid.uuid4().hex
-    parts = []
-    for name, value in (("chat_id", channel), ("caption", text), ("parse_mode", "HTML")):
-        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'
-                     .encode("utf-8"))
-    parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="photo"; filename="{image_path.name}"\r\n'
+    fields = [("chat_id", chat), ("caption", text), ("parse_mode", "HTML")]
+    if reply_markup:
+        fields.append(("reply_markup", json.dumps(reply_markup)))
+    parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode("utf-8")
+             for name, value in fields]
+    parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="photo"; filename="photo.jpg"\r\n'
                  f"Content-Type: application/octet-stream\r\n\r\n".encode("utf-8"))
-    parts.append(image_path.read_bytes() + f"\r\n--{boundary}--\r\n".encode("utf-8"))
+    parts.append(image + f"\r\n--{boundary}--\r\n".encode("utf-8"))
     req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendPhoto", data=b"".join(parts),
                                  headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
     with urllib.request.urlopen(req, timeout=60) as resp:
         return _check(json.loads(resp.read().decode("utf-8")))
+
+
+_bot_name = []
+
+
+def bot_username() -> str:
+    """The bot's @username (BOT_USERNAME setting, else asked once with getMe)."""
+    if not _bot_name:
+        name = setting("BOT_USERNAME")
+        if not name:
+            with urllib.request.urlopen(f"https://api.telegram.org/bot{setting('TELEGRAM_BOT_TOKEN')}/getMe",
+                                        timeout=30) as resp:
+                name = _check(json.loads(resp.read().decode("utf-8"))).get("username", "")
+        _bot_name.append(name)
+    return _bot_name[0]
+
+
+def order_button(record: dict):
+    """🛒 Reserve opens a chat with the bot (t.me deep link), which takes the order; none when sold out."""
+    if record["post"].get("stock") == 0 or not bot_username():
+        return None
+    return {"inline_keyboard": [[{"text": "🛒 Reserve", "url": f"https://t.me/{bot_username()}?start=o{record['id']}"}]]}
 
 
 def publish(records: list, chat: str = "") -> None:
@@ -85,7 +108,8 @@ def publish(records: list, chat: str = "") -> None:
     if not (token and target):
         raise RuntimeError("Telegram is not set up (TELEGRAM_BOT_TOKEN / TELEGRAM_CHANNEL missing).")
     for r in records:
-        sent = _send_photo(token, target, outbox.OUTBOX_DIR / r["image"], caption(r["post"]))
+        sent = send_photo(token, target, (outbox.OUTBOX_DIR / r["image"]).read_bytes(), caption(r["post"]),
+                          order_button(r))
         outbox.mark_published(r["id"], chat=target, message_id=sent.get("message_id"))
 
 
@@ -93,6 +117,9 @@ def edit(record: dict) -> None:
     """Rewrite an already posted listing (e.g. new stock) with editMessageCaption."""
     params = {"chat_id": record["chat"], "message_id": record["message_id"],
               "caption": caption(record["post"]), "parse_mode": "HTML"}
+    markup = order_button(record)
+    if markup:  # without it Telegram drops the button, which is what we want when sold out
+        params["reply_markup"] = markup
     req = urllib.request.Request(f"https://api.telegram.org/bot{setting('TELEGRAM_BOT_TOKEN')}/editMessageCaption",
                                  data=json.dumps(params).encode("utf-8"), headers={"Content-Type": "application/json"})
     try:
