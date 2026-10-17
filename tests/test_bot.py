@@ -49,6 +49,7 @@ class BotTest(unittest.TestCase):
         self.tg_photo = mock.patch.object(publish_telegram, "send_photo").start()
         self.tg_edit = mock.patch.object(publish_telegram, "edit").start()
         mock.patch.object(bot.design, "designs", return_value=[b"d1", b"d2", b"d3"]).start()
+        mock.patch.object(bot, "wake_price_server").start()
         self.addCleanup(mock.patch.stopall)
         bot.drafts.clear()
         bot.waiting.clear()
@@ -143,6 +144,15 @@ class BotTest(unittest.TestCase):
         post = bot.drafts[draft_id]["post"]
         self.assertEqual((post["note"], post["price_text"], post["unit_price_text"]), ("5 kg €8", "€8.00", "€1.60/kg"))
         bot.generate_post.assert_called_once()  # tapping the price doesn't call the model again
+
+    def test_market_price_shown_with_the_price_question(self):
+        bot.generate_post.return_value = dict(POST, search="persimmons")
+        with mock.patch.object(bot, "market_price", return_value="💡 Online shops (DE) ...") as mp:
+            self.photo_only()
+        mp.assert_called_once_with("persimmons", "€")
+        question = self.sent_texts()[-1]
+        self.assertIn("💡 Online shops (DE) ...", question)
+        self.assertTrue(question.endswith("How much?"))
 
     def test_photo_only_then_type_price(self):
         draft_id = self.photo_only()

@@ -136,8 +136,19 @@ def buttons(draft_id: str, action: str, labels: list, per_row: int = 5) -> list:
     return [keys[i:i + per_row] for i in range(0, len(keys), per_row)]
 
 
+def wake_price_server() -> None:
+    """The free price server sleeps when idle; wake it while Gemma looks at the photo."""
+    def ping():
+        try:
+            urllib.request.urlopen(f"{PRICE_URL}/health", timeout=90).close()
+        except OSError:
+            pass
+    threading.Thread(target=ping, daemon=True).start()
+
+
 def start_from_photo(chat_id: int, image: bytes) -> None:
     api("sendMessage", chat_id=chat_id, text="Looking at your photo… (about 30 seconds)")
+    wake_price_server()
     draft_id = uuid.uuid4().hex[:8]
     post = dict(generate_post(image, ""), note="")
     drafts[draft_id] = {"post": post, "image": image, "original": image, "note": ""}
@@ -146,8 +157,14 @@ def start_from_photo(chat_id: int, image: bytes) -> None:
     if last:
         rows.insert(0, [{"text": f"⭐ {last} (like last time)", "callback_data": f"last:{draft_id}:0"}])
     rows.append([{"text": "✏️ Type it", "callback_data": f"type:{draft_id}:0"}])
-    api("sendMessage", chat_id=chat_id, text=f"<b>{html.escape(post['title'])}</b>\nHow much?",
-        parse_mode="HTML", reply_markup={"inline_keyboard": rows})
+    hint = ""
+    if post.get("search"):  # show online prices while the seller decides, not after
+        try:
+            hint = market_price(post["search"], currency())
+        except Exception as e:
+            print("Market price lookup failed:", e)
+    api("sendMessage", chat_id=chat_id, parse_mode="HTML", reply_markup={"inline_keyboard": rows},
+        text=f"<b>{html.escape(post['title'])}</b>\n\n" + (f"{html.escape(hint)}\n\n" if hint else "") + "How much?")
 
 
 def finish(chat_id: int, draft_id: str, note: str) -> None:
@@ -291,7 +308,6 @@ def handle(update: dict) -> None:
         elif action == "design":
             d["image"] = d["original"] if choice == "orig" else d["designs"][int(choice)]
             send_draft(chat_id, draft_id)
-            send_market_price(chat_id, d["post"])
         elif action == "redo":
             redo(chat_id, draft_id)
         elif action == "post":
