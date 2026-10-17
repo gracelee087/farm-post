@@ -6,23 +6,33 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
+SKILL_FILE = Path(__file__).parent / "skills" / "farm-post" / "SKILL.md"
+
+
+def listing_rules(skill_text: str) -> str:
+    """Steps 1-2 of SKILL.md, so the bot and the phone skill follow the same listing rules."""
+    return skill_text.split("## Step 1", 1)[1].split("## Step 3", 1)[0].strip()
+
 
 PROMPT = """You write sales listings for a small rural business run by one person or a family
 anywhere in the world. Products can be anything they grow or make: farm produce, eggs, honey,
 preserves, or handmade goods such as knitted clothes, woodwork, pottery or soap.
-Look at the photo and read the seller's note. Reply with ONLY a JSON object with these keys:
-"item": what the product is, in a few English words,
-"title": a short, catchy English listing title (max 8 words),
-"body": a friendly English description, 3-6 sentences,
-"tags": 3-6 short English tags (list of strings).
-Rules: use only facts visible in the photo or stated in the note. Do not invent prices,
-quantities, weights, varieties, origins, organic claims or dates. If you mention a quantity,
-use exactly the number from the note. Do not describe animals, people or places that are not
-in the photo or note. Do not mention prices in the body; they are shown separately.
+Look at the photo and read the seller's note, then follow these rules:
 
-Seller's note: {note}"""
+## Step 1""" + listing_rules(SKILL_FILE.read_text(encoding="utf-8")) + """
+
+If you mention a quantity, use exactly the number from the note.
+Reply with ONLY a JSON object with these keys:
+"item": what the product is, in a few English words,
+"title": the listing title,
+"body": the listing description,
+"tags": list of tag strings,
+"search": 2-4 English words to look up similar products in online shops, e.g. "hand knitted wool scarf".
+
+Seller's note: """
 
 NUM = r"(\d+(?:[.,]\d+)?)"
 # Currency symbols and words -> how the price is written. A 3-letter code (e.g. "500 KES") also works.
@@ -92,7 +102,7 @@ def generate_post(image_bytes: bytes, note: str, model: str = "gemma4:e4b") -> d
         "model": model,
         "messages": [{
             "role": "user",
-            "content": PROMPT.format(note=note.strip() or "(no note)"),
+            "content": PROMPT + (note.strip() or "(no note)"),
             "images": [base64.b64encode(image_bytes).decode("ascii")],
         }],
         "format": "json",
@@ -123,6 +133,7 @@ def generate_post(image_bytes: bytes, note: str, model: str = "gemma4:e4b") -> d
         "price_text": price_text,
         "unit_price_text": unit_price_text,
         "tags": [str(t).strip() for t in tags],
+        "search": str(data.get("search", "")).strip(),
         "model": model,
         "seconds": round(seconds, 2),
     }

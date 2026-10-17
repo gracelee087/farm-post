@@ -9,6 +9,7 @@ import json
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -21,6 +22,9 @@ from generate import generate_post
 HELP = ("Send me a photo of what you are selling, with a short note as the caption.\n"
         "For example: hand-knitted scarf, wool, $25")
 OWNER_FILE = Path(__file__).parent / "owner.txt"
+# Our proxy on Render (price-proxy/): it holds the SerpApi key and returns online-shop prices.
+PRICE_URL = "https://farm-post-price-proxy.onrender.com"
+COUNTRY = {"€": "de", "$": "us", "£": "gb", "₹": "in"}  # currency of the note -> shop country
 drafts = {}  # draft id -> {"post", "image", "note"}
 
 
@@ -64,11 +68,32 @@ def send_draft(chat_id: int, draft_id: str) -> None:
     ]]})
 
 
+def market_price(query: str, price_text: str) -> str:
+    """Online-shop prices for similar items as one line for the seller; "" if none found."""
+    gl = COUNTRY.get(price_text[:1]) or publish_telegram.setting("SHOP_COUNTRY") or "us"
+    url = f"{PRICE_URL}/price?" + urllib.parse.urlencode({"q": query[:100], "gl": gl})
+    with urllib.request.urlopen(url, timeout=90) as resp:  # the free server may take ~1 min to wake up
+        d = json.loads(resp.read().decode("utf-8"))
+    if not d.get("count"):
+        return ""
+    cur = d.get("currency_hint") or ""
+    return (f"💡 Online shops ({gl.upper()}) sell \"{query}\" for {cur}{d['min']:.2f} to {cur}{d['max']:.2f}, "
+            f"typical {cur}{d['median']:.2f} ({d['count']} offers). Only a rough guide for a farm or market stall.")
+
+
 def write_draft(chat_id: int, image: bytes, note: str, draft_id: str = "") -> None:
     api("sendMessage", chat_id=chat_id, text="Writing your listing… (about 30 seconds)")
     draft_id = draft_id or uuid.uuid4().hex[:8]
-    drafts[draft_id] = {"post": generate_post(image, note), "image": image, "note": note}
+    post = generate_post(image, note)
+    drafts[draft_id] = {"post": post, "image": image, "note": note}
     send_draft(chat_id, draft_id)
+    if post.get("search"):
+        try:
+            line = market_price(post["search"], post["price_text"])
+            if line:
+                api("sendMessage", chat_id=chat_id, text=line)
+        except Exception as e:  # prices are a bonus; the listing is already there
+            print("Market price lookup failed:", e)
 
 
 def handle(update: dict) -> None:

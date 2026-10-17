@@ -38,7 +38,7 @@ class BotTest(unittest.TestCase):
         for p in (mock.patch.object(outbox, "OUTBOX_DIR", Path(tmp.name) / "outbox"),
                   mock.patch.object(bot, "OWNER_FILE", owner),
                   mock.patch.object(publish_site, "SITE_DIR", Path(tmp.name) / "site"),
-                  mock.patch.dict("os.environ", env),
+                  mock.patch.object(publish_telegram, "setting", lambda name: env.get(name, "")),  # ignore a real .env
                   mock.patch.object(outbox, "is_online", return_value=True),
                   mock.patch.object(bot, "download_photo", return_value=JPEG),
                   mock.patch.object(bot, "generate_post", return_value=dict(POST))):
@@ -89,6 +89,29 @@ class BotTest(unittest.TestCase):
         bot.handle(photo_update(user=123))
         self.assertEqual(bot.OWNER_FILE.read_text(), "123")
         bot.generate_post.assert_called_once()
+
+    def test_market_price_sent_after_draft(self):
+        bot.generate_post.return_value = dict(POST, search="wool scarf")
+        with mock.patch.object(bot, "market_price", return_value="💡 Online shops (US) ...") as mp:
+            bot.handle(photo_update())
+        mp.assert_called_once_with("wool scarf", "$25.00")
+        self.assertEqual(self.sent_texts()[-1], "💡 Online shops (US) ...")
+
+    def test_market_price_failure_keeps_draft(self):
+        bot.generate_post.return_value = dict(POST, search="wool scarf")
+        with mock.patch.object(bot, "market_price", side_effect=OSError("down")):
+            bot.handle(photo_update())
+        self.assertEqual(len(bot.drafts), 1)
+        self.assertIn("Warm Hand-Knitted Scarf", self.sent_texts()[-1])
+
+    def test_market_price_line_from_proxy_json(self):
+        reply = mock.MagicMock()
+        reply.__enter__.return_value.read.return_value = (
+            b'{"query":"wool scarf","gl":"de","count":3,"min":10,"median":20,"max":40,"currency_hint":"\\u20ac"}')
+        with mock.patch("urllib.request.urlopen", return_value=reply) as urlopen:
+            line = bot.market_price("wool scarf", "€25.00")
+        self.assertIn("gl=de", urlopen.call_args.args[0])
+        self.assertIn("€10.00 to €40.00, typical €20.00 (3 offers)", line)
 
     def test_text_only_gets_help(self):
         bot.handle({"update_id": 3, "message": {"chat": {"id": 7}, "from": {"id": SELLER}, "text": "hi"}})
